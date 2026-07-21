@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/pinz-core", "crates/pinz-tui"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Gaurgle/pinz"
+
+# Shared dependency versions live here so every crate pins the same line.
+# Empty on purpose for now: pinz-core is std-only, and renderer deps
+# (ratatui, serde, ...) get added deliberately when we reach them.
+[workspace.dependencies]

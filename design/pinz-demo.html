@@ -1,0 +1,462 @@
+<title>pinz — terminal bulletin board</title>
+<style>
+  :root{
+    color-scheme: dark;
+    --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
+    --surface0:#313244; --surface1:#45475a; --overlay0:#6c7086; --overlay1:#7f849c;
+    --text:#cdd6f4; --subtext:#a6adc8;
+    --yellow:#f9e2af; --green:#a6e3a1; --blue:#89b4fa; --pink:#f5c2e7;
+    --peach:#fab387; --mauve:#cba6f7; --teal:#94e2d5; --red:#f38ba8; --lavender:#b4befe;
+    --mono: ui-monospace,"JetBrainsMono Nerd Font","JetBrains Mono",Menlo,Monaco,"Cascadia Code",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--crust); color:var(--text);
+    font-family:var(--mono); font-size:14px; line-height:1.4;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
+    height:100vh; display:flex; flex-direction:column;
+  }
+
+  /* ---- terminal frame ---- */
+  .app{
+    flex:1; margin:12px; display:flex; flex-direction:column;
+    border:1px solid var(--surface0); border-radius:8px;
+    background:var(--base); overflow:hidden; min-height:0;
+    box-shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  .titlebar{
+    display:flex; align-items:center; gap:12px;
+    padding:8px 12px; background:var(--mantle);
+    border-bottom:1px solid var(--surface0);
+  }
+  .dots{display:flex; gap:6px}
+  .dots i{width:11px;height:11px;border-radius:50%;display:block}
+  .dots i:nth-child(1){background:var(--red)}
+  .dots i:nth-child(2){background:var(--yellow)}
+  .dots i:nth-child(3){background:var(--green)}
+  .brand{font-weight:700; letter-spacing:.5px; color:var(--text)}
+  .brand small{color:var(--overlay1); font-weight:400; letter-spacing:0}
+  .titlebar .spacer{flex:1}
+  .zoombox{display:flex; align-items:center; gap:8px; color:var(--subtext); font-size:12px}
+  .zoomdots{display:flex; gap:4px}
+  .zoomdots b{width:7px;height:7px;border-radius:50%;background:var(--surface1);display:block;transition:background .12s}
+  .zoomdots b.on{background:var(--lavender)}
+  .zlabel{color:var(--overlay1); min-width:118px; text-align:right}
+  .zbtns{display:flex; gap:4px}
+  .zbtns button{
+    font-family:var(--mono); font-size:13px; width:24px;height:22px;
+    background:var(--surface0); color:var(--text); border:1px solid var(--surface1);
+    border-radius:5px; cursor:pointer; line-height:1;
+  }
+  .zbtns button:hover{background:var(--surface1)}
+
+  /* ---- tabs / worlds ---- */
+  .tabs{
+    display:flex; align-items:stretch; gap:2px; padding:6px 10px 0;
+    background:var(--mantle); border-bottom:1px solid var(--surface0);
+  }
+  .tab{
+    font-family:var(--mono); font-size:12.5px; color:var(--subtext);
+    padding:6px 14px; border:1px solid transparent; border-bottom:none;
+    border-radius:6px 6px 0 0; cursor:pointer; background:transparent;
+    display:flex; align-items:center; gap:6px; white-space:nowrap;
+  }
+  .tab:hover{color:var(--text)}
+  .tab .cnt{color:var(--overlay0); font-size:11px}
+  .tab.active{
+    background:var(--base); color:var(--text);
+    border-color:var(--surface0); position:relative; top:1px;
+  }
+  .tab.active::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--lavender);border-radius:2px}
+  .tab .name[contenteditable]{outline:none}
+  .tab.addtab{color:var(--overlay0); padding:6px 10px}
+
+  /* ---- board viewport ---- */
+  .viewport{
+    position:relative; flex:1; min-height:0; overflow:hidden;
+    background-color:var(--mantle);
+    background-image:radial-gradient(circle, var(--surface0) 1.1px, transparent 1.2px);
+    cursor:grab; touch-action:none;
+  }
+  .viewport.panning{cursor:grabbing}
+  .world{position:absolute; inset:0}
+
+  /* ---- post-it ---- */
+  .note{
+    position:absolute; top:0; left:0;
+    background:var(--nc); color:var(--crust);
+    border-radius:3px; overflow:hidden;
+    box-shadow:0 6px 14px rgba(0,0,0,.38), 0 1px 0 rgba(255,255,255,.15) inset;
+    display:flex; flex-direction:column; will-change:transform;
+    --nc:var(--yellow);
+  }
+  .note[data-color="yellow"]{--nc:var(--yellow)}
+  .note[data-color="green"]{--nc:var(--green)}
+  .note[data-color="blue"]{--nc:var(--blue)}
+  .note[data-color="pink"]{--nc:var(--pink)}
+  .note[data-color="peach"]{--nc:var(--peach)}
+  .note[data-color="mauve"]{--nc:var(--mauve)}
+  .note[data-color="teal"]{--nc:var(--teal)}
+  .note[data-color="red"]{--nc:var(--red)}
+  .note.dragging{box-shadow:0 16px 34px rgba(0,0,0,.55); z-index:50}
+
+  .note-grip{
+    height:15px; flex:0 0 auto; cursor:grab;
+    background:rgba(0,0,0,.12); display:flex; align-items:center;
+    padding:0 5px; font-size:9px; color:rgba(0,0,0,.5);
+  }
+  .note.dragging .note-grip{cursor:grabbing}
+  .note-inner{flex:1; min-height:0; padding:6px 8px 8px; overflow:hidden; display:flex; flex-direction:column; gap:5px}
+  .note-title{font-weight:700; line-height:1.25; outline:none; letter-spacing:.2px}
+  .note-body{font-weight:400; line-height:1.35; outline:none; color:rgba(17,17,27,.82); overflow:hidden}
+
+  /* ---- LOD: level drives what a note shows ---- */
+  .note[data-lod="4"] .note-title{font-size:13px}
+  .note[data-lod="4"] .note-body{font-size:11.5px; display:block}
+
+  .note[data-lod="3"] .note-title{font-size:11px; -webkit-line-clamp:2; display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden}
+  .note[data-lod="3"] .note-body{font-size:9.5px; -webkit-line-clamp:3; display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden}
+
+  .note[data-lod="2"] .note-title{font-size:9.5px; -webkit-line-clamp:2; display:-webkit-box; -webkit-box-orient:vertical; overflow:hidden}
+  .note[data-lod="2"] .note-body{display:none}
+  .note[data-lod="2"] .note-grip{height:9px}
+
+  .note[data-lod="1"] .note-inner{display:none}
+  .note[data-lod="1"] .note-grip{display:none}
+  .note[data-lod="1"]{border-radius:2px; box-shadow:0 4px 9px rgba(0,0,0,.4)}
+
+  .note[data-lod="0"] .note-inner,.note[data-lod="0"] .note-grip{display:none}
+  .note[data-lod="0"]{border-radius:50%; box-shadow:0 2px 6px rgba(0,0,0,.45)}
+
+  /* ---- scrollbars (camera position) ---- */
+  .sb{position:absolute; background:rgba(49,50,68,.35); border-radius:6px; pointer-events:none}
+  .sb-v{right:5px; top:6px; bottom:16px; width:6px}
+  .sb-h{left:6px; right:16px; bottom:5px; height:6px}
+  .sb-thumb{position:absolute; background:var(--overlay0); border-radius:6px; opacity:.7}
+  .sb-v .sb-thumb{left:0; right:0}
+  .sb-h .sb-thumb{top:0; bottom:0}
+
+  /* ---- footer / keybinds ---- */
+  .footer{
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    padding:7px 12px; background:var(--mantle);
+    border-top:1px solid var(--surface0); font-size:11.5px; color:var(--overlay1);
+  }
+  .footer .k{color:var(--subtext)}
+  .footer kbd{
+    font-family:var(--mono); background:var(--surface0); color:var(--text);
+    border:1px solid var(--surface1); border-bottom-width:2px; border-radius:4px;
+    padding:1px 5px; font-size:10.5px;
+  }
+  .footer .spacer{flex:1}
+  .footer .hint{color:var(--overlay0)}
+  button:focus-visible,[contenteditable]:focus-visible,.tab:focus-visible{outline:2px solid var(--lavender); outline-offset:1px}
+</style>
+
+<div class="app">
+  <div class="titlebar">
+    <div class="dots"><i></i><i></i><i></i></div>
+    <div class="brand">📌 pinz <small>— terminal bulletin board</small></div>
+    <div class="spacer"></div>
+    <div class="zoombox">
+      <span class="zlabel" id="zlabel">document view</span>
+      <div class="zoomdots" id="zoomdots"></div>
+      <div class="zbtns">
+        <button id="zout" title="zoom out">−</button>
+        <button id="zin" title="zoom in">+</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <div class="viewport" id="viewport">
+    <div class="world" id="world"></div>
+    <div class="sb sb-v"><div class="sb-thumb" id="sbvthumb"></div></div>
+    <div class="sb sb-h"><div class="sb-thumb" id="sbhthumb"></div></div>
+  </div>
+
+  <div class="footer">
+    <span><span class="k">scroll</span> zoom</span>
+    <span><span class="k">drag note</span> move</span>
+    <span><span class="k">drag board</span> pan</span>
+    <span><span class="k">dbl-click note</span> focus / edit</span>
+    <span><kbd>n</kbd> new</span>
+    <span><kbd>+</kbd><kbd>−</kbd> zoom</span>
+    <span class="spacer"></span>
+    <span class="hint" id="statushint">5 zoom levels · single note = a notez2 note + x/y/z</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const NOTE_W = 200, NOTE_H = 150, GRID = 48;
+  const WORLD_W = 2600, WORLD_H = 1700;
+  const SCALE = [0.13, 0.24, 0.42, 0.68, 1.0];   // index === zoom level, 0 = far out
+  const ZLABEL = ["survey","cluster","titles","preview","document view"];
+  const COLORS = ["yellow","green","blue","pink","peach","mauve","teal","red"];
+
+  // ---- data: each note is a notez2-style note + spatial metadata (x,y,z,board,color) ----
+  let nextId = 1;
+  const n = (x,y,color,title,body)=>({id:nextId++, x, y, color, title, body});
+  const worlds = [
+    { name:"ideas", notes:[
+      n(120,110,"yellow","pinz","Terminal bulletin board. Discrete LOD zoom ladder. Canvas for far zoom, real widgets for near zoom."),
+      n(470,150,"peach","Auracast venue audits","Walk a venue, map where broadcast audio should reach. Sell the report."),
+      n(300,430,"mauve","WM leak-tracing service","Turn the audio watermark into a leak-tracing offering."),
+      n(720,380,"green","Fortnox integrations","Small automations for Swedish e-commerce bookkeeping."),
+      n(560,640,"blue","z-suffix names","tackz · pinz · corkz · boardz — pick one and commit."),
+    ]},
+    { name:"wavez", notes:[
+      n(140,130,"blue","Broadcast platform","Auracast source/sink/assistant roles as a full-stack product."),
+      n(500,200,"teal","BASS assistant role","Scan + hand off broadcast code to the sink."),
+      n(360,470,"pink","nRF5340 kit pairing","Kits connect + pair. No end-to-end LC3 audio yet."),
+      n(760,420,"peach","LTV / PAC parser","Reuse the record parser from Sigma work."),
+    ]},
+    { name:"life", notes:[
+      n(150,140,"red","Job search","Android > Kotlin > backend. Ship visible portfolio pieces."),
+      n(520,180,"green","zalary 2026","Update tax tables from SKV 433. Figures are year-keyed."),
+      n(340,450,"blue","dotfiles","Add new tool to .dotcore, commit, dotup on both Macs."),
+    ]},
+  ];
+
+  let activeWorld = 0;
+  let zoom = 4;
+  const cam = { x: 40, y: 30 };
+
+  const viewport = document.getElementById("viewport");
+  const world = document.getElementById("world");
+  const tabsEl = document.getElementById("tabs");
+  const zlabel = document.getElementById("zlabel");
+  const zoomdots = document.getElementById("zoomdots");
+  const sbv = document.getElementById("sbvthumb");
+  const sbh = document.getElementById("sbhthumb");
+
+  for(let i=0;i<5;i++){ const b=document.createElement("b"); zoomdots.appendChild(b); }
+
+  function clamp(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); }
+  function scale(){ return SCALE[zoom]; }
+  function viewWorldW(){ return viewport.clientWidth / scale(); }
+  function viewWorldH(){ return viewport.clientHeight / scale(); }
+
+  function clampCam(){
+    cam.x = clamp(cam.x, -80, Math.max(-80, WORLD_W - viewWorldW() + 80));
+    cam.y = clamp(cam.y, -80, Math.max(-80, WORLD_H - viewWorldH() + 80));
+  }
+
+  // ---- build DOM once per world ----
+  function buildTabs(){
+    tabsEl.innerHTML = "";
+    worlds.forEach((w,i)=>{
+      const t = document.createElement("div");
+      t.className = "tab" + (i===activeWorld ? " active":"");
+      t.tabIndex = 0;
+      t.innerHTML = `<span class="name">${w.name}</span><span class="cnt">${w.notes.length}</span>`;
+      t.addEventListener("click", ()=>{ switchWorld(i); });
+      const nameEl = t.querySelector(".name");
+      t.addEventListener("dblclick",(e)=>{
+        e.stopPropagation();
+        nameEl.setAttribute("contenteditable","true");
+        nameEl.focus();
+        document.getSelection().selectAllChildren(nameEl);
+      });
+      nameEl.addEventListener("blur",()=>{
+        nameEl.removeAttribute("contenteditable");
+        w.name = nameEl.textContent.trim() || "board";
+        nameEl.textContent = w.name;
+      });
+      nameEl.addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); nameEl.blur(); }});
+      tabsEl.appendChild(t);
+    });
+    const add = document.createElement("div");
+    add.className = "tab addtab"; add.textContent = "+ board"; add.tabIndex = 0;
+    add.addEventListener("click", addWorld);
+    tabsEl.appendChild(add);
+  }
+
+  function buildWorld(){
+    world.innerHTML = "";
+    const w = worlds[activeWorld];
+    w.notes.forEach(note=>{
+      const el = document.createElement("div");
+      el.className = "note";
+      el.dataset.color = note.color;
+      el.innerHTML =
+        `<div class="note-grip">📌</div>`+
+        `<div class="note-inner">`+
+          `<div class="note-title" contenteditable="true" spellcheck="false"></div>`+
+          `<div class="note-body" contenteditable="true" spellcheck="false"></div>`+
+        `</div>`;
+      el.querySelector(".note-title").textContent = note.title;
+      el.querySelector(".note-body").textContent = note.body;
+      note._el = el;
+      wireNote(note, el);
+      world.appendChild(el);
+    });
+    layout();
+  }
+
+  function layout(){
+    const s = scale();
+    const gpx = GRID * s;
+    viewport.style.backgroundSize = `${gpx}px ${gpx}px`;
+    viewport.style.backgroundPosition = `${-cam.x*s}px ${-cam.y*s}px`;
+    const w = worlds[activeWorld];
+    const wpx = NOTE_W*s, hpx = NOTE_H*s;
+    w.notes.forEach(note=>{
+      const el = note._el;
+      el.dataset.lod = zoom;
+      el.style.width = wpx+"px";
+      el.style.height = hpx+"px";
+      el.style.transform = `translate(${(note.x-cam.x)*s}px, ${(note.y-cam.y)*s}px)`;
+    });
+    // zoom indicator
+    zoomdots.querySelectorAll("b").forEach((b,i)=> b.classList.toggle("on", i<=zoom));
+    zlabel.textContent = ZLABEL[zoom];
+    // scrollbars
+    const vTrack = viewport.clientHeight - 22, hTrack = viewport.clientWidth - 22;
+    const vh = clamp(viewWorldH()/WORLD_H,0,1), vy = clamp(cam.y/WORLD_H,0,1-vh);
+    sbv.style.height = (vh*vTrack)+"px"; sbv.style.top = (vy*vTrack)+"px";
+    const hw = clamp(viewWorldW()/WORLD_W,0,1), hx = clamp(cam.x/WORLD_W,0,1-hw);
+    sbh.style.width = (hw*hTrack)+"px"; sbh.style.left = (hx*hTrack)+"px";
+  }
+
+  function switchWorld(i){
+    if(i===activeWorld) return;
+    activeWorld = i; cam.x = 40; cam.y = 30;
+    buildTabs(); buildWorld();
+  }
+  function addWorld(){
+    worlds.push({ name:"board "+(worlds.length+1), notes:[] });
+    switchWorld(worlds.length-1);
+  }
+
+  // ---- note interaction: drag to move, dbl-click to focus, edit inline ----
+  function bringToFront(note, el){
+    world.appendChild(el);
+  }
+  function wireNote(note, el){
+    const title = el.querySelector(".note-title");
+    const body = el.querySelector(".note-body");
+    title.addEventListener("input", ()=> note.title = title.textContent);
+    body.addEventListener("input", ()=> note.body = body.textContent);
+
+    el.addEventListener("pointerdown",(e)=>{
+      e.stopPropagation(); // never let the board pan when grabbing a note
+      const onText = e.target.closest(".note-title,.note-body");
+      // at document zoom, clicking the text places a caret instead of dragging
+      if(zoom===4 && onText) { bringToFront(note, el); return; }
+      startNoteDrag(note, el, e);
+    });
+    el.addEventListener("dblclick",(e)=>{
+      e.stopPropagation();
+      if(zoom<4){ focusNote(note); }
+      else { const t=e.target.closest(".note-title,.note-body")||body; t.focus(); }
+    });
+  }
+
+  let drag = null;
+  function startNoteDrag(note, el, e){
+    bringToFront(note, el);
+    el.classList.add("dragging");
+    drag = { note, el, sx:e.clientX, sy:e.clientY, ox:note.x, oy:note.y };
+    viewport.setPointerCapture?.(e.pointerId);
+  }
+
+  // ---- board pan ----
+  let pan = null;
+  viewport.addEventListener("pointerdown",(e)=>{
+    if(e.target.closest(".note")) return;
+    pan = { sx:e.clientX, sy:e.clientY, ox:cam.x, oy:cam.y };
+    viewport.classList.add("panning");
+    viewport.setPointerCapture?.(e.pointerId);
+  });
+
+  window.addEventListener("pointermove",(e)=>{
+    const s = scale();
+    if(drag){
+      drag.note.x = drag.ox + (e.clientX - drag.sx)/s;
+      drag.note.y = drag.oy + (e.clientY - drag.sy)/s;
+      layout();
+    } else if(pan){
+      cam.x = pan.ox - (e.clientX - pan.sx)/s;
+      cam.y = pan.oy - (e.clientY - pan.sy)/s;
+      clampCam(); layout();
+    }
+  });
+  window.addEventListener("pointerup",()=>{
+    if(drag){ drag.el.classList.remove("dragging"); drag=null; }
+    if(pan){ viewport.classList.remove("panning"); pan=null; }
+  });
+
+  // ---- zoom (toward a focal point in screen space) ----
+  function setZoom(nz, focalX, focalY){
+    nz = clamp(nz,0,4);
+    if(nz===zoom) return;
+    const rect = viewport.getBoundingClientRect();
+    const fx = (focalX==null? rect.width/2 : focalX-rect.left);
+    const fy = (focalY==null? rect.height/2 : focalY-rect.top);
+    const wx = cam.x + fx/scale(), wy = cam.y + fy/scale();
+    zoom = nz;
+    cam.x = wx - fx/scale(); cam.y = wy - fy/scale();
+    clampCam(); layout();
+  }
+  function focusNote(note){
+    const rect = viewport.getBoundingClientRect();
+    zoom = 4;
+    cam.x = note.x + NOTE_W/2 - (rect.width/scale())/2;
+    cam.y = note.y + NOTE_H/2 - (rect.height/scale())/2;
+    clampCam(); layout();
+  }
+
+  let wheelAccum = 0;
+  viewport.addEventListener("wheel",(e)=>{
+    e.preventDefault();
+    wheelAccum += e.deltaY;
+    if(Math.abs(wheelAccum) < 60) return;
+    const dir = wheelAccum>0 ? -1 : 1; // scroll up = zoom in
+    wheelAccum = 0;
+    setZoom(zoom+dir, e.clientX, e.clientY);
+  }, {passive:false});
+
+  document.getElementById("zin").addEventListener("click",()=>setZoom(zoom+1));
+  document.getElementById("zout").addEventListener("click",()=>setZoom(zoom-1));
+
+  // ---- new note at view center ----
+  let colorTick = 0;
+  function addNote(){
+    const w = worlds[activeWorld];
+    const cx = cam.x + viewWorldW()/2 - NOTE_W/2;
+    const cy = cam.y + viewWorldH()/2 - NOTE_H/2;
+    const note = n(clamp(cx,0,WORLD_W-NOTE_W), clamp(cy,0,WORLD_H-NOTE_H),
+                   COLORS[colorTick++ % COLORS.length], "new note", "…");
+    w.notes.push(note);
+    buildTabs(); buildWorld();
+    if(zoom<3) setZoom(4);
+    requestAnimationFrame(()=>{ const t=note._el.querySelector(".note-title"); t.focus(); document.getSelection().selectAllChildren(t); });
+  }
+
+  // ---- keyboard ----
+  window.addEventListener("keydown",(e)=>{
+    if(e.target.isContentEditable){ if(e.key==="Escape") e.target.blur(); return; }
+    if(e.key==="n"){ addNote(); }
+    else if(e.key==="+"||e.key==="="){ setZoom(zoom+1); }
+    else if(e.key==="-"||e.key==="_"){ setZoom(zoom-1); }
+    else if(e.key.startsWith("Arrow")){
+      const step = 90/scale();
+      if(e.key==="ArrowLeft") cam.x-=step;
+      if(e.key==="ArrowRight") cam.x+=step;
+      if(e.key==="ArrowUp") cam.y-=step;
+      if(e.key==="ArrowDown") cam.y+=step;
+      clampCam(); layout(); e.preventDefault();
+    }
+  });
+
+  window.addEventListener("resize", ()=>{ clampCam(); layout(); });
+
+  buildTabs();
+  buildWorld();
+})();
+</script>

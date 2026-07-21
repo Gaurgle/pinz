@@ -1,0 +1,15 @@
+[package]
+name = "pinz-tui"
+description = "Terminal renderer for pinz (Ratatui). Stub for now."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pinz"
+path = "src/main.rs"
+
+[dependencies]
+pinz-core = { path = "../pinz-core" }
+# ratatui + crossterm land here when we wire the real UI.

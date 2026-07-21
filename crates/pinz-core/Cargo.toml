@@ -1,0 +1,9 @@
+[package]
+name = "pinz-core"
+description = "UI-agnostic core for pinz: domain model, world/screen projection, and the storage seam."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
