@@ -5,6 +5,9 @@
 //! zoomed in (titles/preview/document) they are real bordered widgets with text.
 //! The projection layer ([`View`]) decides where everything lands; this module
 //! only decides how it looks at each zoom.
+//!
+//! All color comes from the active [`Theme`], never a hardcoded constant, so a
+//! theme swap re-skins every widget with no other change.
 
 use pinz_core::{Note, WorldPoint, ZoomLevel};
 use ratatui::{
@@ -16,7 +19,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Mode};
-use crate::theme;
+use crate::theme::Theme;
 use crate::view::View;
 
 /// Paint the whole app: header, tabs, board, footer.
@@ -34,27 +37,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // before we draw it.
     app.set_viewport(rows[2]);
 
-    draw_header(frame, rows[0], app);
-    draw_tabs(frame, rows[1], app);
-    draw_board(frame, rows[2], app);
-    draw_footer(frame, rows[3], app);
+    let theme = app.theme();
+    draw_header(frame, rows[0], app, &theme);
+    draw_tabs(frame, rows[1], app, &theme);
+    draw_board(frame, rows[2], app, &theme);
+    draw_footer(frame, rows[3], app, &theme);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(28)]).split(area);
 
     let brand = Line::from(vec![
         Span::styled(
             "📌 pinz",
-            Style::new().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "  — terminal bulletin board",
-            Style::new().fg(theme::OVERLAY1),
+            Style::new().fg(theme.overlay1),
         ),
     ]);
     frame.render_widget(
-        Paragraph::new(brand).style(Style::new().bg(theme::MANTLE)),
+        Paragraph::new(brand).style(Style::new().bg(theme.mantle)),
         cols[0],
     );
 
@@ -63,55 +67,55 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = Vec::new();
     for i in 0..ZoomLevel::ALL.len() {
         let (glyph, color) = if i <= idx {
-            ("●", theme::LAVENDER)
+            ("●", theme.accent)
         } else {
-            ("○", theme::SURFACE1)
+            ("○", theme.surface1)
         };
         spans.push(Span::styled(glyph, Style::new().fg(color)));
         spans.push(Span::raw(" "));
     }
     spans.push(Span::styled(
         format!("{:<8}", app.zoom().label()),
-        Style::new().fg(theme::OVERLAY1),
+        Style::new().fg(theme.overlay1),
     ));
     frame.render_widget(
         Paragraph::new(Line::from(spans))
             .alignment(Alignment::Right)
-            .style(Style::new().bg(theme::MANTLE)),
+            .style(Style::new().bg(theme.mantle)),
         cols[1],
     );
 }
 
-fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_tabs(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut spans = vec![Span::raw(" ")];
     for (i, board) in app.boards().iter().enumerate() {
         let active = i == app.active_index();
         let (fg, modifier) = if active {
-            (theme::TEXT, Modifier::BOLD)
+            (theme.text, Modifier::BOLD)
         } else {
-            (theme::SUBTEXT, Modifier::empty())
+            (theme.subtext, Modifier::empty())
         };
         let marker = if active { "▎" } else { " " };
-        spans.push(Span::styled(marker, Style::new().fg(theme::LAVENDER)));
+        spans.push(Span::styled(marker, Style::new().fg(theme.accent)));
         spans.push(Span::styled(
             format!("{} ", board.name),
             Style::new().fg(fg).add_modifier(modifier),
         ));
         spans.push(Span::styled(
             format!("{}  ", board.notes.len()),
-            Style::new().fg(theme::OVERLAY0),
+            Style::new().fg(theme.overlay0),
         ));
     }
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme::MANTLE)),
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.mantle)),
         area,
     );
 }
 
-fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Background wash.
-    frame.render_widget(Block::new().style(Style::new().bg(theme::BASE)), area);
-    draw_grid(frame, area, app);
+    frame.render_widget(Block::new().style(Style::new().bg(theme.base)), area);
+    draw_grid(frame, area, app, theme);
 
     let view = View::new(app.camera(), area);
 
@@ -120,24 +124,24 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
     notes.sort_by_key(|n| n.z);
 
     match app.zoom() {
-        ZoomLevel::Survey => draw_far(frame, area, &view, &notes, false),
-        ZoomLevel::Cluster => draw_far(frame, area, &view, &notes, true),
+        ZoomLevel::Survey => draw_far(frame, area, &view, &notes, false, theme),
+        ZoomLevel::Cluster => draw_far(frame, area, &view, &notes, true, theme),
         lod => {
             for note in &notes {
                 if let Some(rect) = view.note_rect(note.position()) {
-                    draw_note_widget(frame, rect, note, lod, app);
+                    draw_note_widget(frame, rect, note, lod, app, theme);
                 }
             }
         }
     }
 
-    draw_scrollbars(frame, area, app);
+    draw_scrollbars(frame, area, app, theme);
 }
 
 /// The dot grid, aligned to world coordinates so it slides under the notes as
 /// you pan - a cheap sense of place. Skipped when the grid would be too dense to
 /// read.
-fn draw_grid(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_grid(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     const GRID_WORLD: f64 = 48.0;
     let view = View::new(app.camera(), area);
     let (sx, _sy) = view.scale();
@@ -167,7 +171,7 @@ fn draw_grid(frame: &mut Frame, area: Rect, app: &App) {
             let col = area.x + cx as u16;
             let row = area.y + cy as u16;
             if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_symbol("·").set_fg(theme::SURFACE0);
+                cell.set_symbol("·").set_fg(theme.surface0);
             }
             gy += GRID_WORLD;
         }
@@ -177,9 +181,16 @@ fn draw_grid(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Zoomed-out path: a note is a shape, not a widget. `filled` distinguishes the
 /// cluster level (solid colored blocks) from survey (a single colored pip).
-fn draw_far(frame: &mut Frame, area: Rect, view: &View, notes: &[&Note], filled: bool) {
+fn draw_far(
+    frame: &mut Frame,
+    area: Rect,
+    view: &View,
+    notes: &[&Note],
+    filled: bool,
+    theme: &Theme,
+) {
     for note in notes {
-        let color = theme::note_color(note.color);
+        let color = theme.note(note.color);
         if filled {
             if let Some(rect) = view.note_rect(note.position()) {
                 frame.render_widget(Block::new().style(Style::new().bg(color)), rect);
@@ -200,24 +211,29 @@ fn draw_far(frame: &mut Frame, area: Rect, view: &View, notes: &[&Note], filled:
 
 /// Zoomed-in path: a real post-it - bordered, colored, with text sized to the
 /// zoom level. The document level is where the selected note is editable.
-fn draw_note_widget(frame: &mut Frame, rect: Rect, note: &Note, lod: ZoomLevel, app: &App) {
-    let color = theme::note_color(note.color);
+fn draw_note_widget(
+    frame: &mut Frame,
+    rect: Rect,
+    note: &Note,
+    lod: ZoomLevel,
+    app: &App,
+    theme: &Theme,
+) {
+    let color = theme.note(note.color);
     let selected = app.selected() == Some(note.id);
     let editing = selected && app.mode() == Mode::EditTitle;
 
     let border_style = if selected {
-        Style::new()
-            .fg(theme::LAVENDER)
-            .add_modifier(Modifier::BOLD)
+        Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(theme::CRUST)
+        Style::new().fg(theme.note_fg)
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(Span::styled("📌", Style::new().fg(theme::CRUST)))
-        .style(Style::new().bg(color).fg(theme::CRUST));
+        .title(Span::styled("📌", Style::new().fg(theme.note_fg)))
+        .style(Style::new().bg(color).fg(theme.note_fg));
 
     // Compute the inner area before the block is consumed by render. Clear first
     // so the note is opaque: a Block only restyles cells, it won't wipe the grid
@@ -237,7 +253,7 @@ fn draw_note_widget(frame: &mut Frame, rect: Rect, note: &Note, lod: ZoomLevel, 
 
     let mut lines = vec![Line::from(Span::styled(
         title,
-        Style::new().fg(theme::CRUST).add_modifier(Modifier::BOLD),
+        Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
     ))];
 
     // Body appears from preview level up.
@@ -245,7 +261,7 @@ fn draw_note_widget(frame: &mut Frame, rect: Rect, note: &Note, lod: ZoomLevel, 
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             note.body.clone(),
-            Style::new().fg(theme::CRUST),
+            Style::new().fg(theme.note_fg),
         )));
     }
 
@@ -255,7 +271,7 @@ fn draw_note_widget(frame: &mut Frame, rect: Rect, note: &Note, lod: ZoomLevel, 
 /// Thin position indicators along the right and bottom edges, sized and placed
 /// like the demo's scrollbars: they show where the camera sits in the note
 /// cloud. Hidden on an axis when everything already fits.
-fn draw_scrollbars(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_scrollbars(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let Some((min, max)) = content_extent(app) else {
         return;
     };
@@ -276,7 +292,7 @@ fn draw_scrollbars(frame: &mut Frame, area: Rect, app: &App) {
         let len = (frac * track).round().max(1.0) as u16;
         let top = area.y + (pos * track).round() as u16;
         let col = area.x + area.width - 1;
-        paint_bar(frame, col, top, len, true, area);
+        paint_bar(frame, col, top, len, true, area, theme.overlay0);
     }
 
     // Horizontal bar on the bottom edge.
@@ -287,18 +303,26 @@ fn draw_scrollbars(frame: &mut Frame, area: Rect, app: &App) {
         let len = (frac * track).round().max(1.0) as u16;
         let left = area.x + (pos * track).round() as u16;
         let row = area.y + area.height - 1;
-        paint_bar(frame, left, row, len, false, area);
+        paint_bar(frame, left, row, len, false, area, theme.overlay0);
     }
 }
 
-fn paint_bar(frame: &mut Frame, x: u16, y: u16, len: u16, vertical: bool, area: Rect) {
+fn paint_bar(
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    len: u16,
+    vertical: bool,
+    area: Rect,
+    color: ratatui::style::Color,
+) {
     let buf = frame.buffer_mut();
     for i in 0..len {
         let (cx, cy) = if vertical { (x, y + i) } else { (x + i, y) };
         if cx < area.x + area.width && cy < area.y + area.height {
             if let Some(cell) = buf.cell_mut((cx, cy)) {
                 cell.set_symbol(if vertical { "▐" } else { "▄" })
-                    .set_fg(theme::OVERLAY0);
+                    .set_fg(color);
             }
         }
     }
@@ -324,37 +348,36 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
     Some((min, max))
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let hint = match app.mode() {
         Mode::EditTitle => Line::from(vec![
             Span::styled(
                 "editing title",
-                Style::new()
-                    .fg(theme::LAVENDER)
-                    .add_modifier(Modifier::BOLD),
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  ", Style::new().fg(theme::OVERLAY0)),
-            key_hint("enter", "save"),
-            key_hint("esc", "cancel"),
+            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
+            key_hint("enter", "save", theme.overlay1),
+            key_hint("esc", "cancel", theme.overlay1),
         ]),
         Mode::Nav => Line::from(vec![
-            key_hint("scroll/±", "zoom"),
-            key_hint("drag", "move/pan"),
-            key_hint("n", "new"),
-            key_hint("e", "edit"),
-            key_hint("d", "del"),
-            key_hint("tab/1-9", "world"),
-            key_hint("q", "quit"),
+            key_hint("scroll/±", "zoom", theme.overlay1),
+            key_hint("drag", "move/pan", theme.overlay1),
+            key_hint("n", "new", theme.overlay1),
+            key_hint("e", "edit", theme.overlay1),
+            key_hint("d", "del", theme.overlay1),
+            key_hint("tab", "world", theme.overlay1),
+            key_hint("t", &format!("theme:{}", theme.name), theme.overlay1),
+            key_hint("q", "quit", theme.overlay1),
         ]),
     };
     frame.render_widget(
-        Paragraph::new(hint).style(Style::new().bg(theme::MANTLE)),
+        Paragraph::new(hint).style(Style::new().bg(theme.mantle)),
         area,
     );
 }
 
-fn key_hint(key: &str, label: &str) -> Span<'static> {
-    Span::styled(format!(" {key} {label} "), Style::new().fg(theme::OVERLAY1))
+fn key_hint(key: &str, label: &str, color: ratatui::style::Color) -> Span<'static> {
+    Span::styled(format!(" {key} {label} "), Style::new().fg(color))
 }
 
 #[cfg(test)]
@@ -364,9 +387,12 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn render() -> ratatui::buffer::Buffer {
+    fn render_with(theme_name: Option<&str>) -> ratatui::buffer::Buffer {
         let mut store = MemoryStore::seeded();
         let mut app = App::new(store.load().unwrap());
+        if let Some(name) = theme_name {
+            app.set_theme_by_name(name);
+        }
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         terminal.backend().buffer().clone()
@@ -385,7 +411,7 @@ mod tests {
 
     #[test]
     fn renders_brand_tabs_and_a_note_title() {
-        let buf = render();
+        let buf = render_with(None);
         let text = buffer_text(&buf);
         assert!(text.contains("pinz"), "brand missing:\n{text}");
         assert!(text.contains("ideas"), "world tab missing:\n{text}");
@@ -395,11 +421,19 @@ mod tests {
     }
 
     #[test]
-    fn renders_footer_keybinds() {
-        let buf = render();
+    fn footer_shows_the_active_theme_name() {
+        let buf = render_with(Some("nord"));
         let text = buffer_text(&buf);
-        assert!(text.contains("zoom"), "footer hint missing:\n{text}");
-        assert!(text.contains("quit"), "footer hint missing:\n{text}");
+        assert!(text.contains("Nord"), "active theme name missing:\n{text}");
+    }
+
+    #[test]
+    fn a_light_theme_paints_a_light_board_background() {
+        // Solarized Light's base is near-white; the board wash should carry it,
+        // proving color really flows from the theme, not a constant.
+        let buf = render_with(Some("light"));
+        let board_cell = &buf[(2, 10)]; // somewhere on the board area
+        assert_eq!(board_cell.bg, ratatui::style::Color::Rgb(0xfd, 0xf6, 0xe3));
     }
 
     #[test]

@@ -29,6 +29,9 @@ fn main() -> io::Result<()> {
     let mut store = MemoryStore::seeded();
     let boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
     let mut app = App::new(boards);
+    if let Some(name) = requested_theme() {
+        app.set_theme_by_name(&name);
+    }
 
     let mut terminal = setup()?;
     let result = run(&mut terminal, &mut app);
@@ -39,6 +42,22 @@ fn main() -> io::Result<()> {
     let _ = store.save(app.boards());
 
     result
+}
+
+/// A starting theme from the command line, if given: `pinz nord` or
+/// `pinz --theme "solarized light"`. The name is matched loosely later, so a
+/// rough spelling is fine. Anything unrecognized just falls back to the default.
+fn requested_theme() -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--theme" | "-t" => return args.get(i + 1).cloned(),
+            s if !s.starts_with('-') => return Some(s.to_string()),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// Enter raw mode + the alternate screen + mouse capture, and install a panic

@@ -62,6 +62,13 @@ What the renderer settled on (`crates/pinz-tui`):
   they are cheap shapes painted straight into the buffer. **Done.**
 - A custom tab strip for worlds and lightweight edge bars as camera-position
   indicators; a five-dot zoom indicator (not `Gauge` - too heavy). **Done.**
+- Theming is swappable, not baked in. A `Theme` is the full palette (backgrounds,
+  text, one accent, and the eight note accents the core names abstractly); the
+  app holds one active theme and every widget reads its color from there, so a
+  swap re-skins everything with no other change. Ships with a handful (Catppuccin
+  Mocha, Tokyo Night, Gruvbox, Nord, Solarized Light - deliberately one light
+  theme, to keep the renderer honest about not assuming a dark background); cycle
+  with `t`, or pick one at launch. The core stays color-agnostic. **Done.**
 - Editing: title is editable inline today; body editing and a real textarea for
   the document level are the next step. **Partial.**
 - Storage still runs through the in-memory `Store`; the app calls `save` on exit

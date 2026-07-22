@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
+use crate::theme::{self, Theme};
 use crate::view::View;
 
 /// Arrow-key pan step, in cells.
@@ -59,6 +60,8 @@ pub struct App {
     centered: bool,
     next_id: u64,
     color_tick: usize,
+    /// Index into [`theme::THEMES`] of the active theme.
+    theme_index: usize,
     should_quit: bool,
 }
 
@@ -88,6 +91,7 @@ impl App {
             centered: false,
             next_id,
             color_tick: 0,
+            theme_index: 0,
             should_quit: false,
         }
     }
@@ -120,6 +124,32 @@ impl App {
     }
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// The active theme (a small `Copy` palette).
+    pub fn theme(&self) -> Theme {
+        theme::THEMES[self.theme_index]
+    }
+
+    /// Select a theme by (loose, case-insensitive) name; ignored if no match.
+    /// Used at launch to honor a `--theme` argument. Returns whether it stuck.
+    pub fn set_theme_by_name(&mut self, name: &str) -> bool {
+        match theme::index_by_name(name) {
+            Some(i) => {
+                self.theme_index = i;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn cycle_theme(&mut self, forward: bool) {
+        let n = theme::THEMES.len();
+        self.theme_index = if forward {
+            (self.theme_index + 1) % n
+        } else {
+            (self.theme_index + n - 1) % n
+        };
     }
 
     /// Record the viewport the board was last drawn into, and center the board
@@ -167,6 +197,8 @@ impl App {
             KeyCode::Char('n') => self.new_note(),
             KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => self.delete_selected(),
             KeyCode::Char('e') | KeyCode::Enter => self.begin_edit(),
+            KeyCode::Char('t') => self.cycle_theme(true),
+            KeyCode::Char('T') => self.cycle_theme(false),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
@@ -573,6 +605,39 @@ mod tests {
         let id = a.selected().unwrap();
         let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(note.title, "new note");
+    }
+
+    #[test]
+    fn t_cycles_themes_forward_and_wraps() {
+        let mut a = app();
+        let first = a.theme().name;
+        a.on_key(key(KeyCode::Char('t')));
+        assert_ne!(a.theme().name, first, "cycling should change the theme");
+        // Walk all the way around; it must land back on the first.
+        for _ in 1..super::theme::THEMES.len() {
+            a.on_key(key(KeyCode::Char('t')));
+        }
+        assert_eq!(a.theme().name, first, "cycling should wrap");
+    }
+
+    #[test]
+    fn shift_t_cycles_backward() {
+        let mut a = app();
+        let first = a.theme().name;
+        a.on_key(key(KeyCode::Char('T')));
+        // One step back from the first theme is the last theme.
+        assert_eq!(a.theme().name, super::theme::THEMES.last().unwrap().name);
+        a.on_key(key(KeyCode::Char('t')));
+        assert_eq!(a.theme().name, first);
+    }
+
+    #[test]
+    fn set_theme_by_name_matches_loosely() {
+        let mut a = app();
+        assert!(a.set_theme_by_name("gruvbox"));
+        assert_eq!(a.theme().name, "Gruvbox");
+        assert!(!a.set_theme_by_name("nonesuch"));
+        assert_eq!(a.theme().name, "Gruvbox", "a miss leaves the theme alone");
     }
 
     #[test]

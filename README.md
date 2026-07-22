@@ -32,14 +32,19 @@ arrow is what lets a terminal app and a desktop app share one brain.
 ## Run it
 
 ```sh
-cargo run --bin pinz     # launches the terminal app (seeded with demo boards)
-cargo test               # runs the core + renderer unit tests
+cargo run --bin pinz            # launches the terminal app (seeded with demo boards)
+cargo run --bin pinz -- nord    # ...starting in a chosen theme
+cargo test                      # runs the core + renderer unit tests
 ```
 
 Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
 **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
 `1`-`9` to switch worlds, `n` for a new note, `e` to edit its title, `d` to
-delete, `q` to quit.
+delete, `t` to cycle the theme (`T` backwards), `q` to quit.
+
+There are a few built-in themes - Catppuccin Mocha (default), Tokyo Night,
+Gruvbox, Nord, and Solarized Light. Cycle them live with `t`, or start in one by
+name: `pinz -- gruvbox` (the match is loose, so `pinz -- light` works too).
 
 To compare against the intended look, open `design/pinz-demo.html` in a browser -
 the TUI mirrors its interactions in cells.
