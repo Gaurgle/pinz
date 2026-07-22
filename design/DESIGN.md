@@ -69,8 +69,12 @@ What the renderer settled on (`crates/pinz-tui`):
   Mocha, Tokyo Night, Gruvbox, Nord, Solarized Light - deliberately one light
   theme, to keep the renderer honest about not assuming a dark background); cycle
   with `t`, or pick one at launch. The core stays color-agnostic. **Done.**
-- Editing: title is editable inline today; body editing and a real textarea for
-  the document level are the next step. **Partial.**
+- Editing: both the title and the body are editable inline, backed by a small
+  UI-agnostic text editor (`pinz-tui/src/editor.rs`) - char-accurate cursor,
+  multi-line body, insert/delete/newline, and horizontal + vertical movement.
+  `Tab` switches field; the caret rides in the character flow so it survives
+  wrapping. Edits are written back to the note on every keystroke. A fuller
+  editor (word motions, selection, undo) can grow from the same seam. **Done.**
 - Storage still runs through the in-memory `Store`; the app calls `save` on exit
   so a git-backed store drops in without touching the renderer. **Seam ready.**
 - Not `ratatui-3d`: the board is fundamentally 2D; 3D buys nothing here.

@@ -18,7 +18,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, Field};
 use crate::theme::Theme;
 use crate::view::View;
 
@@ -221,7 +221,6 @@ fn draw_note_widget(
 ) {
     let color = theme.note(note.color);
     let selected = app.selected() == Some(note.id);
-    let editing = selected && app.mode() == Mode::EditTitle;
 
     let border_style = if selected {
         Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
@@ -245,27 +244,31 @@ fn draw_note_widget(
         return;
     }
 
-    let title = if editing {
-        format!("{}▏", app.edit_buf())
-    } else {
-        note.title.clone()
-    };
+    // Text comes from the app: the live edit buffer (with a caret) for whichever
+    // field is being typed into, otherwise the note's own text.
+    let (title, _) = app.field_display(note, Field::Title);
+    let (body, body_active) = app.field_display(note, Field::Body);
 
     let mut lines = vec![Line::from(Span::styled(
         title,
         Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
     ))];
 
-    // Body appears from preview level up.
-    if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
+    // Body appears from preview level up (and always while it's being edited, so
+    // the caret is visible even in an empty body). Split on newlines so a
+    // multi-line body renders as multiple lines.
+    if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && (!body.is_empty() || body_active)
+    {
         lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            note.body.clone(),
-            Style::new().fg(theme.note_fg),
-        )));
+        for bl in body.split('\n') {
+            lines.push(Line::from(Span::styled(
+                bl.to_string(),
+                Style::new().fg(theme.note_fg),
+            )));
+        }
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Thin position indicators along the right and bottom edges, sized and placed
@@ -349,17 +352,20 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let hint = match app.mode() {
-        Mode::EditTitle => Line::from(vec![
+    let hint = if let Some(field) = app.edit_field() {
+        Line::from(vec![
             Span::styled(
-                "editing title",
+                format!("editing {}", field.label()),
                 Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
-            key_hint("enter", "save", theme.overlay1),
-            key_hint("esc", "cancel", theme.overlay1),
-        ]),
-        Mode::Nav => Line::from(vec![
+            key_hint("↑↓←→", "move", theme.overlay1),
+            key_hint("tab", "title/body", theme.overlay1),
+            key_hint("enter", "newline", theme.overlay1),
+            key_hint("esc", "done", theme.overlay1),
+        ])
+    } else {
+        Line::from(vec![
             key_hint("scroll/±", "zoom", theme.overlay1),
             key_hint("drag", "move/pan", theme.overlay1),
             key_hint("n", "new", theme.overlay1),
@@ -368,7 +374,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key_hint("tab", "world", theme.overlay1),
             key_hint("t", &format!("theme:{}", theme.name), theme.overlay1),
             key_hint("q", "quit", theme.overlay1),
-        ]),
+        ])
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::new().bg(theme.mantle)),
@@ -434,6 +440,35 @@ mod tests {
         let buf = render_with(Some("light"));
         let board_cell = &buf[(2, 10)]; // somewhere on the board area
         assert_eq!(board_cell.bg, ratatui::style::Color::Rgb(0xfd, 0xf6, 0xe3));
+    }
+
+    #[test]
+    fn editing_a_body_draws_the_typed_text_with_a_caret() {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        let press = |c: KeyCode| KeyEvent {
+            code: c,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // center
+
+        app.on_key(press(KeyCode::Char('n'))); // new note, editing the title
+        app.on_key(press(KeyCode::Tab)); // -> body
+        for c in "hello".chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("hello"), "typed body missing:\n{text}");
+        assert!(text.contains('▏'), "edit caret missing:\n{text}");
     }
 
     #[test]

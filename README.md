@@ -7,9 +7,10 @@ switchable "worlds".
 
 > Status: **playable.** The core model and projection math are tested, and the
 > terminal UI now draws: a pannable, zoomable board of post-it notes with the
-> five-level detail ladder, switchable worlds, and mouse move/select. Editing is
-> title-only for now (body editing and a real textarea are next). Storage is
-> still in-memory, so nothing persists across runs yet.
+> five-level detail ladder, switchable worlds, mouse move/select, and full
+> **title + body editing** (a small multi-line text editor with cursor movement).
+> Storage is still in-memory, so nothing persists across runs yet - a git-backed
+> store is the next step.
 
 ## Why it is built this way
 
@@ -39,8 +40,13 @@ cargo test                      # runs the core + renderer unit tests
 
 Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
 **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
-`1`-`9` to switch worlds, `n` for a new note, `e` to edit its title, `d` to
-delete, `t` to cycle the theme (`T` backwards), `q` to quit.
+`1`-`9` to switch worlds, `n` for a new note, `e` to edit it, `d` to delete, `t`
+to cycle the theme (`T` backwards), `q` to quit.
+
+While editing a note: type to insert at the cursor, arrow keys / `Home` / `End`
+to move, `Tab` to switch between the **title** and the **body**, `Enter` for a
+new line in the body (from the title it drops you into the body), and `Esc` when
+you're done. Edits apply live.
 
 There are a few built-in themes - Catppuccin Mocha (default), Tokyo Night,
 Gruvbox, Nord, and Solarized Light. Cycle them live with `t`, or start in one by

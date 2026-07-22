@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
+use crate::editor::TextEditor;
 use crate::theme::{self, Theme};
 use crate::view::View;
 
@@ -21,13 +22,30 @@ const PAN_CELLS: f64 = 4.0;
 /// world units. Enough to breathe; not enough to lose the board.
 const PAN_MARGIN: f64 = 80.0;
 
-/// What the keyboard is doing right now.
+/// Which part of a note the editor is focused on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Navigating the board.
-    Nav,
-    /// Editing the selected note's title.
-    EditTitle,
+pub enum Field {
+    Title,
+    Body,
+}
+
+impl Field {
+    /// The short label the footer shows while this field is being edited.
+    pub fn label(self) -> &'static str {
+        match self {
+            Field::Title => "title",
+            Field::Body => "body",
+        }
+    }
+}
+
+/// An in-progress edit: which note, which field, and the live text buffer. The
+/// buffer owns the text being typed; it is written back into the note on every
+/// keystroke (see [`App::sync_edit`]) so the note is never stale.
+struct Edit {
+    id: u64,
+    field: Field,
+    editor: TextEditor,
 }
 
 /// A drag in progress, started on mouse-down.
@@ -50,8 +68,8 @@ pub struct App {
     camera: Camera,
     /// Currently selected note (by id), if any.
     selected: Option<u64>,
-    mode: Mode,
-    edit_buf: String,
+    /// The active edit session, if the user is typing into a note.
+    editing: Option<Edit>,
     drag: Option<Drag>,
     /// The board viewport from the last render, needed to interpret mouse
     /// positions and to center content. Zero until the first draw.
@@ -84,8 +102,7 @@ impl App {
                 zoom: ZoomLevel::Titles,
             },
             selected: None,
-            mode: Mode::Nav,
-            edit_buf: String::new(),
+            editing: None,
             drag: None,
             viewport: Rect::default(),
             centered: false,
@@ -116,14 +133,36 @@ impl App {
     pub fn selected(&self) -> Option<u64> {
         self.selected
     }
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-    pub fn edit_buf(&self) -> &str {
-        &self.edit_buf
-    }
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Whether the user is currently typing into a note.
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// The field being edited right now, if any.
+    pub fn edit_field(&self) -> Option<Field> {
+        self.editing.as_ref().map(|e| e.field)
+    }
+
+    /// The text to render for `field` of `note`: the live buffer (with the caret
+    /// spliced in) when this is the field being edited, otherwise the note's own
+    /// text. The bool reports whether this field is the active edit target, so
+    /// the renderer can highlight it. The caret rides in the character flow, so
+    /// it stays correct through wrapping.
+    pub fn field_display(&self, note: &Note, field: Field) -> (String, bool) {
+        if let Some(edit) = &self.editing {
+            if edit.id == note.id && edit.field == field {
+                return (edit.editor.with_caret("▏"), true);
+            }
+        }
+        let text = match field {
+            Field::Title => &note.title,
+            Field::Body => &note.body,
+        };
+        (text.clone(), false)
     }
 
     /// The active theme (a small `Copy` palette).
@@ -185,7 +224,7 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if self.mode == Mode::EditTitle {
+        if self.is_editing() {
             self.edit_key(key);
             return;
         }
@@ -196,7 +235,7 @@ impl App {
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_at_center(false),
             KeyCode::Char('n') => self.new_note(),
             KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => self.delete_selected(),
-            KeyCode::Char('e') | KeyCode::Enter => self.begin_edit(),
+            KeyCode::Char('e') | KeyCode::Enter => self.begin_edit(Field::Title),
             KeyCode::Char('t') => self.cycle_theme(true),
             KeyCode::Char('T') => self.cycle_theme(false),
             KeyCode::Tab => self.switch_world(self.active + 1),
@@ -210,40 +249,121 @@ impl App {
         }
     }
 
+    /// Keystrokes while editing. Text keys drive the [`TextEditor`]; a few keys
+    /// are structural (switch field, finish, newline) and need the wider `App`.
     fn edit_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Esc => {
+                self.finish_edit();
+                return;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.switch_field();
+                return;
+            }
             KeyCode::Enter => {
-                if let Some(id) = self.selected {
-                    let buf = std::mem::take(&mut self.edit_buf);
-                    if let Some(note) = self.note_mut(id) {
-                        note.title = buf;
+                // Enter adds a line in the body; from the single-line title it
+                // moves you down into the body instead.
+                if self.edit_field() == Some(Field::Body) {
+                    if let Some(e) = self.editing.as_mut() {
+                        e.editor.newline();
+                    }
+                } else {
+                    self.switch_field();
+                    return;
+                }
+            }
+            code => {
+                if let Some(e) = self.editing.as_mut() {
+                    match code {
+                        KeyCode::Backspace => e.editor.backspace(),
+                        KeyCode::Delete => e.editor.delete(),
+                        KeyCode::Left => e.editor.left(),
+                        KeyCode::Right => e.editor.right(),
+                        KeyCode::Up => e.editor.up(),
+                        KeyCode::Down => e.editor.down(),
+                        KeyCode::Home => e.editor.home(),
+                        KeyCode::End => e.editor.end(),
+                        KeyCode::Char(c) => e.editor.insert(c),
+                        _ => {}
                     }
                 }
-                self.mode = Mode::Nav;
             }
-            KeyCode::Esc => {
-                self.edit_buf.clear();
-                self.mode = Mode::Nav;
+        }
+        self.sync_edit();
+    }
+
+    /// Open the editor on `field` of the selected note, zoom in so it's legible,
+    /// and bring it to the middle of the view.
+    fn begin_edit(&mut self, field: Field) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let Some(note) = self.active_board().notes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let editor = match field {
+            Field::Title => TextEditor::single_line(&note.title),
+            Field::Body => TextEditor::multi_line(&note.body),
+        };
+        self.editing = Some(Edit { id, field, editor });
+        self.camera.zoom = ZoomLevel::Document;
+        self.center_on_note(id);
+    }
+
+    /// Write the live buffer back into the note. Called after every edit so the
+    /// note is always current - quitting or saving mid-edit loses nothing.
+    fn sync_edit(&mut self) {
+        let Some(edit) = self.editing.as_ref() else {
+            return;
+        };
+        let (id, field, text) = (edit.id, edit.field, edit.editor.text());
+        if let Some(note) = self.note_mut(id) {
+            match field {
+                Field::Title => note.title = text,
+                Field::Body => note.body = text,
             }
-            KeyCode::Backspace => {
-                self.edit_buf.pop();
-            }
-            KeyCode::Char(c) => self.edit_buf.push(c),
-            _ => {}
         }
     }
 
-    fn begin_edit(&mut self) {
-        if let Some(id) = self.selected {
-            self.edit_buf = self
-                .active_board()
-                .notes
-                .iter()
-                .find(|n| n.id == id)
-                .map(|n| n.title.clone())
-                .unwrap_or_default();
-            self.mode = Mode::EditTitle;
+    /// Toggle the editor between the title and the body, loading the other
+    /// field's current text.
+    fn switch_field(&mut self) {
+        self.sync_edit();
+        let Some(edit) = self.editing.as_ref() else {
+            return;
+        };
+        let (id, next) = (
+            edit.id,
+            match edit.field {
+                Field::Title => Field::Body,
+                Field::Body => Field::Title,
+            },
+        );
+        let text = self
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| match next {
+                Field::Title => n.title.clone(),
+                Field::Body => n.body.clone(),
+            })
+            .unwrap_or_default();
+        if let Some(edit) = self.editing.as_mut() {
+            edit.field = next;
+            edit.editor = match next {
+                Field::Title => TextEditor::single_line(&text),
+                Field::Body => TextEditor::multi_line(&text),
+            };
         }
+    }
+
+    /// Commit and leave edit mode. The buffer is already synced live, so this
+    /// just drops the session.
+    fn finish_edit(&mut self) {
+        self.sync_edit();
+        self.editing = None;
     }
 
     // ---- mouse ----
@@ -268,8 +388,8 @@ impl App {
             return;
         }
         // Editing ends the moment you touch the board.
-        if self.mode == Mode::EditTitle {
-            self.mode = Mode::Nav;
+        if self.is_editing() {
+            self.finish_edit();
         }
         let world = self.view().world_at(col, row);
         // Topmost note under the cursor wins, respecting stack order.
@@ -431,6 +551,26 @@ impl App {
         self.clamp_origin();
     }
 
+    /// Center the camera on one note - used when we drop into edit mode so the
+    /// note you're typing into is in the middle of the view.
+    fn center_on_note(&mut self, id: u64) {
+        let Some(center) = self
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.center())
+        else {
+            return;
+        };
+        let (sx, sy) = self.view().scale();
+        self.camera.origin = WorldPoint {
+            x: center.x - (self.viewport.width as f64 / 2.0) / sx,
+            y: center.y - (self.viewport.height as f64 / 2.0) / sy,
+        };
+        self.clamp_origin();
+    }
+
     // ---- world switching ----
 
     fn switch_world(&mut self, index: usize) {
@@ -443,7 +583,7 @@ impl App {
         }
         self.active = index;
         self.selected = None;
-        self.mode = Mode::Nav;
+        self.editing = None;
         self.centered = false; // re-center on the new board's content
     }
 
@@ -470,7 +610,7 @@ impl App {
         self.next_id += 1;
         self.active_board_mut().notes.push(Note {
             id,
-            title: "new note".to_string(),
+            title: String::new(),
             body: String::new(),
             x: center.x,
             y: center.y,
@@ -478,11 +618,8 @@ impl App {
             color,
         });
         self.selected = Some(id);
-        // Zoom in to write, then start editing the title straight away.
-        self.camera.zoom = ZoomLevel::Document;
-        self.clamp_origin();
-        self.edit_buf = "new note".to_string();
-        self.mode = Mode::EditTitle;
+        // Drop straight into editing the (empty) title, zoomed in to write.
+        self.begin_edit(Field::Title);
     }
 
     fn delete_selected(&mut self) {
@@ -570,6 +707,10 @@ mod tests {
         assert_eq!(a.active_index(), 2);
     }
 
+    fn note_by_id(a: &App, id: u64) -> &Note {
+        a.active_board().notes.iter().find(|n| n.id == id).unwrap()
+    }
+
     #[test]
     fn new_note_adds_selects_and_enters_edit() {
         let mut a = app();
@@ -577,34 +718,69 @@ mod tests {
         a.on_key(key(KeyCode::Char('n')));
         assert_eq!(a.active_board().notes.len(), before + 1);
         assert!(a.selected().is_some());
-        assert_eq!(a.mode(), Mode::EditTitle);
+        assert!(a.is_editing());
+        assert_eq!(a.edit_field(), Some(Field::Title));
         assert_eq!(a.zoom(), ZoomLevel::Document);
     }
 
     #[test]
-    fn editing_a_title_rewrites_it_on_enter() {
+    fn typing_edits_the_title_live_and_esc_keeps_it() {
         let mut a = app();
-        a.on_key(key(KeyCode::Char('n'))); // creates + edits, buf = "new note"
-        for c in "hi".chars() {
+        a.on_key(key(KeyCode::Char('n'))); // fresh note, empty title, editing
+        for c in "milk".chars() {
             a.on_key(key(KeyCode::Char(c)));
         }
-        a.on_key(key(KeyCode::Enter));
-        assert_eq!(a.mode(), Mode::Nav);
         let id = a.selected().unwrap();
-        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
-        assert_eq!(note.title, "new notehi");
+        assert_eq!(note_by_id(&a, id).title, "milk", "edits apply live");
+        a.on_key(key(KeyCode::Esc));
+        assert!(!a.is_editing(), "esc finishes editing");
+        assert_eq!(note_by_id(&a, id).title, "milk", "and keeps the text");
     }
 
     #[test]
-    fn escape_while_editing_discards_the_change() {
+    fn insertion_happens_at_the_cursor_not_the_end() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('n')));
-        a.on_key(key(KeyCode::Char('Z')));
-        a.on_key(key(KeyCode::Esc));
-        assert_eq!(a.mode(), Mode::Nav);
+        for c in "ac".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Left)); // between a and c
+        a.on_key(key(KeyCode::Char('b')));
         let id = a.selected().unwrap();
-        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
-        assert_eq!(note.title, "new note");
+        assert_eq!(note_by_id(&a, id).title, "abc");
+    }
+
+    #[test]
+    fn tab_moves_to_the_body_and_enter_adds_lines_there() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        for c in "title".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Tab)); // -> body
+        assert_eq!(a.edit_field(), Some(Field::Body));
+        for c in "one".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Enter)); // newline in the body
+        for c in "two".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        let id = a.selected().unwrap();
+        assert_eq!(
+            note_by_id(&a, id).title,
+            "title",
+            "title survived the switch"
+        );
+        assert_eq!(note_by_id(&a, id).body, "one\ntwo");
+    }
+
+    #[test]
+    fn enter_from_the_title_drops_into_the_body() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Enter)); // title -> body (no newline in a title)
+        assert_eq!(a.edit_field(), Some(Field::Body));
     }
 
     #[test]
@@ -644,7 +820,7 @@ mod tests {
     fn delete_removes_the_selected_note() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('n')));
-        a.on_key(key(KeyCode::Enter)); // commit edit, back to Nav, still selected
+        a.on_key(key(KeyCode::Esc)); // finish editing, back to Nav, still selected
         let before = a.active_board().notes.len();
         a.on_key(key(KeyCode::Char('d')));
         assert_eq!(a.active_board().notes.len(), before - 1);
