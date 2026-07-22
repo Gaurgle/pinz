@@ -1,42 +1,83 @@
-//! `pinz` terminal app - stub.
+//! `pinz` - a spatial bulletin board in your terminal.
 //!
-//! Ratatui is not wired in yet; that is a deliberate later step. For now this
-//! proves the wiring: it loads boards through the [`Store`] seam and prints a
-//! summary, plus one sample projection, so `pinz-core` has a real consumer and
-//! we can see the pieces fit before drawing a single cell.
+//! This binary is the Ratatui renderer. It loads boards through the
+//! [`Store`](pinz_core::Store) seam, then hands drawing to [`ui`] and input to
+//! [`app::App`]. All the domain and projection math lives in `pinz-core`; this
+//! crate is just the terminal skin over it.
 
-use pinz_core::{Camera, MemoryStore, Projection, Store, WorldPoint, ZoomLevel};
+mod app;
+mod theme;
+mod ui;
+mod view;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+use std::io::{self, Stdout};
+use std::panic;
+
+use app::App;
+use pinz_core::{MemoryStore, Store};
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::Terminal;
+
+type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+fn main() -> io::Result<()> {
     let mut store = MemoryStore::seeded();
-    let boards = store.load()?;
+    let boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut app = App::new(boards);
 
-    println!("pinz - {} board(s)\n", boards.len());
-    for board in &boards {
-        println!("  [{}]  {} note(s)", board.name, board.notes.len());
-        for note in &board.notes {
-            println!("     - ({:>4.0},{:>4.0})  {}", note.x, note.y, note.title);
+    let mut terminal = setup()?;
+    let result = run(&mut terminal, &mut app);
+    restore()?;
+
+    // Persist on exit. For the in-memory store this is a no-op, but it exercises
+    // the seam so a git-backed store later needs no changes here.
+    let _ = store.save(app.boards());
+
+    result
+}
+
+/// Enter raw mode + the alternate screen + mouse capture, and install a panic
+/// hook that puts the terminal back before the panic message prints - otherwise
+/// a crash leaves the user's shell wrecked.
+fn setup() -> io::Result<Tui> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let _ = restore();
+        hook(info);
+    }));
+
+    Terminal::new(CrosstermBackend::new(stdout))
+}
+
+fn restore() -> io::Result<()> {
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    disable_raw_mode()
+}
+
+/// Draw, then block for the next event and apply it. No animation loop: the
+/// board only changes in response to input, so a redraw per event is enough and
+/// keeps the app idle at zero CPU.
+fn run(terminal: &mut Tui, app: &mut App) -> io::Result<()> {
+    loop {
+        terminal.draw(|frame| ui::draw(frame, app))?;
+        if app.should_quit() {
+            return Ok(());
         }
-        println!();
+        match event::read()? {
+            // Only act on key presses; ignore key-release/repeat where the
+            // terminal reports them, so a keystroke fires once.
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+            Event::Mouse(mouse) => app.on_mouse(mouse),
+            _ => {}
+        }
     }
-
-    // Sanity-check the projection seam: camera at the origin, fully zoomed in,
-    // terminal cell aspect. A note origin at world (200,150) should land
-    // 200 cells right and 75 cells down (150 * 0.5 aspect).
-    let projection = Projection::new(
-        Camera { origin: WorldPoint { x: 0.0, y: 0.0 }, zoom: ZoomLevel::Document },
-        0.5,
-    );
-    let world = WorldPoint { x: 200.0, y: 150.0 };
-    let screen = projection.to_screen(world);
-    println!(
-        "projection check @ {}: world ({},{}) -> screen ({:.0},{:.0}) cells",
-        projection.camera.zoom.label(),
-        world.x,
-        world.y,
-        screen.x,
-        screen.y,
-    );
-
-    Ok(())
 }

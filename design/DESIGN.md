@@ -48,13 +48,24 @@ projected rect; zoomed out (Survey/Cluster), they are shapes drawn cheaply
 (Ratatui `Canvas`, with braille for any "string between notes"). The projection
 layer chooses the path per level.
 
-## Ratatui stack (planned)
+## Ratatui stack
 
-- Own projection layer as the spine (not a widget).
-- `Rect` + `Paragraph` / a textarea for zoomed-in editable notes.
-- `Canvas` only for the zoomed-out block/dot view and any connective strings.
-- `Tabs` for worlds; two `Scrollbar`s as camera-position indicators.
-- A light custom zoom indicator (not `Gauge` - too heavy for five steps).
+What the renderer settled on (`crates/pinz-tui`):
+
+- Own projection layer as the spine (not a widget). `pinz-tui/src/view.rs` wraps
+  `pinz-core`'s `Projection` and adds the two terminal-only corrections the core
+  leaves out: the cell aspect (~0.5) and a display-unit scalar that rescales the
+  core's pixel-tuned zoom ladder to cell proportions. Everything - pan, zoom,
+  hit-test - goes through it, so the mouse inverse stays exact. **Done.**
+- Split render path by zoom: zoomed in (titles/preview/document), notes are
+  `Block` + `Paragraph` at their projected `Rect`; zoomed out (cluster/survey),
+  they are cheap shapes painted straight into the buffer. **Done.**
+- A custom tab strip for worlds and lightweight edge bars as camera-position
+  indicators; a five-dot zoom indicator (not `Gauge` - too heavy). **Done.**
+- Editing: title is editable inline today; body editing and a real textarea for
+  the document level are the next step. **Partial.**
+- Storage still runs through the in-memory `Store`; the app calls `save` on exit
+  so a git-backed store drops in without touching the renderer. **Seam ready.**
 - Not `ratatui-3d`: the board is fundamentally 2D; 3D buys nothing here.
 
 ## The seam: storage is swappable

@@ -5,10 +5,11 @@ fixed-size post-it notes on a big, pannable, zoomable board - like a real cork
 board, but in a TUI. Notes are movable, stackable, editable, and grouped into
 switchable "worlds".
 
-> Status: **early scaffold.** The look is prototyped (see `design/`), the core
-> model and projection math exist and are tested, and the terminal UI is not
-> drawn yet. Nothing here is usable as an app yet - this repo is the skeleton we
-> build onto.
+> Status: **playable.** The core model and projection math are tested, and the
+> terminal UI now draws: a pannable, zoomable board of post-it notes with the
+> five-level detail ladder, switchable worlds, and mouse move/select. Editing is
+> title-only for now (body editing and a real textarea are next). Storage is
+> still in-memory, so nothing persists across runs yet.
 
 ## Why it is built this way
 
@@ -19,7 +20,7 @@ lives in one UI-agnostic crate and the renderers sit on top:
 ```
 crates/
   pinz-core/   domain model + world/screen projection + storage seam (no UI, no I/O beyond the seam)
-  pinz-tui/    terminal renderer (Ratatui) - currently a stub binary named `pinz`
+  pinz-tui/    terminal renderer (Ratatui) - the `pinz` binary
 design/
   pinz-demo.html   interactive look-and-feel prototype (open in a browser)
   DESIGN.md        the decisions behind the model, the zoom ladder, and the seam
@@ -31,13 +32,17 @@ arrow is what lets a terminal app and a desktop app share one brain.
 ## Run it
 
 ```sh
-cargo run --bin pinz     # prints the seeded boards + a projection check (stub)
-cargo test               # runs the core's unit tests
+cargo run --bin pinz     # launches the terminal app (seeded with demo boards)
+cargo test               # runs the core + renderer unit tests
 ```
 
-To see the intended look and interactions, open `design/pinz-demo.html` in a
-browser: scroll to zoom through the levels of detail, drag notes to move them,
-drag the board to pan, and switch worlds via the header tabs.
+Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
+**drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
+`1`-`9` to switch worlds, `n` for a new note, `e` to edit its title, `d` to
+delete, `q` to quit.
+
+To compare against the intended look, open `design/pinz-demo.html` in a browser -
+the TUI mirrors its interactions in cells.
 
 ## Data model, briefly
 

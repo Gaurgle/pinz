@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Gaurgle/pinz"
 
 # Shared dependency versions live here so every crate pins the same line.
-# Empty on purpose for now: pinz-core is std-only, and renderer deps
-# (ratatui, serde, ...) get added deliberately when we reach them.
+# pinz-core stays std-only; renderer deps live here so each renderer pins the
+# same line. ratatui re-exports its crossterm backend, so we take it from there
+# rather than pinning a separate crossterm that could drift out of sync.
 [workspace.dependencies]
+ratatui = "0.30"
