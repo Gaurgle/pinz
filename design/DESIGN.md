@@ -69,8 +69,13 @@ What the renderer settled on (`crates/pinz-tui`):
   Mocha, Tokyo Night, Gruvbox, Nord, Solarized Light - deliberately one light
   theme, to keep the renderer honest about not assuming a dark background); cycle
   with `t`, or pick one at launch. The core stays color-agnostic. **Done.**
-- Editing: title is editable inline today; body editing and a real textarea for
-  the document level are the next step. **Partial.**
+- Editing: one editor for the whole note - the first line is the title, the rest
+  the body. `e` or `enter` opens it, `enter` adds a line, `esc` saves. It is a
+  hand-rolled multi-line buffer (`pinz-tui/src/editor.rs`) shown at the document
+  level, word-wrapped to the note width with the cursor mapped through the wrap
+  (`wrap_rows` in `ui.rs`) so text never runs off the edge. Not `tui-textarea` -
+  it still targets ratatui 0.29 and would pull a second, incompatible ratatui
+  into the tree; the editor we need is small enough to own. **Done.**
 - Storage still runs through the in-memory `Store`; the app calls `save` on exit
   so a git-backed store drops in without touching the renderer. **Seam ready.**
 - Not `ratatui-3d`: the board is fundamentally 2D; 3D buys nothing here.

@@ -19,6 +19,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Mode};
+use crate::editor::Cursor;
 use crate::theme::Theme;
 use crate::view::View;
 
@@ -221,7 +222,7 @@ fn draw_note_widget(
 ) {
     let color = theme.note(note.color);
     let selected = app.selected() == Some(note.id);
-    let editing = selected && app.mode() == Mode::EditTitle;
+    let editing = selected && app.mode() == Mode::Edit;
 
     let border_style = if selected {
         Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
@@ -245,18 +246,20 @@ fn draw_note_widget(
         return;
     }
 
-    let title = if editing {
-        format!("{}▏", app.edit_buf())
-    } else {
-        note.title.clone()
-    };
+    // While editing, the whole note is one live buffer (line 1 = title, the rest
+    // = body), word-wrapped to the inner width with the cursor mapped through
+    // the wrap so text never runs off the right edge.
+    if let Some(editor) = editing.then(|| app.editor()).flatten() {
+        let lines = editor_lines(editor.lines(), editor.cursor(), inner.width as usize, theme.note_fg);
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
 
+    // Not editing: the title, then (from preview level up) the body.
     let mut lines = vec![Line::from(Span::styled(
-        title,
+        note.title.clone(),
         Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
     ))];
-
-    // Body appears from preview level up.
     if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -264,8 +267,121 @@ fn draw_note_widget(
             Style::new().fg(theme.note_fg),
         )));
     }
-
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+/// The editor's logical lines, wrapped to `width` and rendered for the document
+/// view: line 1 (the title) is bold, and the cursor shows as a reversed cell,
+/// placed through the wrap so it stays on screen on long lines.
+fn editor_lines(
+    logical: &[String],
+    cursor: Cursor,
+    width: usize,
+    fg: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let wrapped = wrap_rows(logical, cursor, width);
+    wrapped
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(vr, (text, li))| {
+            let caret = (vr == wrapped.caret_row).then_some(wrapped.caret_col);
+            row_line(text, *li == 0, fg, caret)
+        })
+        .collect()
+}
+
+/// One rendered row: bold when it belongs to the title line, with an optional
+/// reversed-cell caret at `caret_col` (a block caret past the last character).
+fn row_line(
+    text: &str,
+    title: bool,
+    fg: ratatui::style::Color,
+    caret_col: Option<usize>,
+) -> Line<'static> {
+    let mut base = Style::new().fg(fg);
+    if title {
+        base = base.add_modifier(Modifier::BOLD);
+    }
+    let Some(col) = caret_col else {
+        return Line::from(Span::styled(text.to_string(), base));
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let col = col.min(chars.len());
+    let caret = base.add_modifier(Modifier::REVERSED);
+    let before: String = chars[..col].iter().collect();
+    let mut spans = vec![Span::styled(before, base)];
+    if col < chars.len() {
+        spans.push(Span::styled(chars[col].to_string(), caret));
+        spans.push(Span::styled(chars[col + 1..].iter().collect::<String>(), base));
+    } else {
+        spans.push(Span::styled(" ".to_string(), caret));
+    }
+    Line::from(spans)
+}
+
+/// Editor lines wrapped to a width, plus where the cursor lands in that layout.
+struct EditWrap {
+    /// (visual row text, source logical line index).
+    rows: Vec<(String, usize)>,
+    caret_row: usize,
+    caret_col: usize,
+}
+
+/// Greedy word wrap: break after spaces, hard-break words longer than the width,
+/// and track the cursor's visual position. Spaces are kept at the end of a
+/// wrapped row so every character maps to exactly one visual cell - which is what
+/// lets the caret land precisely after wrapping.
+fn wrap_rows(logical: &[String], cursor: Cursor, width: usize) -> EditWrap {
+    let width = width.max(1);
+    let mut rows: Vec<(String, usize)> = Vec::new();
+    let mut caret_row = 0;
+    let mut caret_col = 0;
+    let mut caret_done = false;
+
+    for (li, line) in logical.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            if li == cursor.row && !caret_done {
+                caret_row = rows.len();
+                caret_col = 0;
+                caret_done = true;
+            }
+            rows.push((String::new(), li));
+            continue;
+        }
+        let mut start = 0;
+        while start < chars.len() {
+            let hard_end = (start + width).min(chars.len());
+            let end = if hard_end == chars.len() {
+                chars.len()
+            } else {
+                match chars[start..hard_end].iter().rposition(|&c| c == ' ') {
+                    Some(rel) if rel > 0 => start + rel + 1,
+                    _ => hard_end,
+                }
+            };
+            if li == cursor.row && !caret_done {
+                let last = end == chars.len();
+                if cursor.col < end || (last && cursor.col <= end) {
+                    caret_row = rows.len();
+                    caret_col = cursor.col - start;
+                    caret_done = true;
+                }
+            }
+            rows.push((chars[start..end].iter().collect(), li));
+            start = end;
+        }
+    }
+
+    if rows.is_empty() {
+        rows.push((String::new(), 0));
+    }
+    if !caret_done {
+        caret_row = rows.len() - 1;
+        caret_col = rows.last().map(|(t, _)| t.chars().count()).unwrap_or(0);
+    }
+    EditWrap { rows, caret_row, caret_col }
 }
 
 /// Thin position indicators along the right and bottom edges, sized and placed
@@ -350,14 +466,17 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let hint = match app.mode() {
-        Mode::EditTitle => Line::from(vec![
+        Mode::Edit => Line::from(vec![
             Span::styled(
-                "editing title",
+                "editing",
                 Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
-            key_hint("enter", "save", theme.overlay1),
-            key_hint("esc", "cancel", theme.overlay1),
+            Span::styled("line 1 is the title", Style::new().fg(theme.overlay0)),
+            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
+            key_hint("enter", "newline", theme.overlay1),
+            key_hint("↑↓←→", "move", theme.overlay1),
+            key_hint("esc", "save", theme.overlay1),
         ]),
         Mode::Nav => Line::from(vec![
             key_hint("scroll/±", "zoom", theme.overlay1),
@@ -434,6 +553,61 @@ mod tests {
         let buf = render_with(Some("light"));
         let board_cell = &buf[(2, 10)]; // somewhere on the board area
         assert_eq!(board_cell.bg, ratatui::style::Color::Rgb(0xfd, 0xf6, 0xe3));
+    }
+
+    #[test]
+    fn editing_renders_title_and_typed_body() {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // establish viewport + centering
+
+        let press = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.on_key(press(KeyCode::Char('n'))); // new note -> edit, "new note"
+        app.on_key(press(KeyCode::Enter)); // newline -> start the body
+        for ch in "hello".chars() {
+            app.on_key(press(KeyCode::Char(ch)));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("new note"), "title should be on screen:\n{text}");
+        assert!(text.contains("hello"), "typed body should be on screen:\n{text}");
+    }
+
+    #[test]
+    fn wrap_keeps_all_characters_and_bounds_the_width() {
+        let lines = vec!["hello world foo".to_string()];
+        let w = wrap_rows(&lines, Cursor { row: 0, col: 15 }, 8);
+        let joined: String = w.rows.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, "hello world foo", "no characters lost to wrapping");
+        assert!(w.rows.iter().all(|(t, _)| t.chars().count() <= 8));
+        assert_eq!((w.caret_row, w.caret_col), (2, 3), "cursor at end tracks to last row");
+    }
+
+    #[test]
+    fn wrap_maps_a_cursor_inside_the_first_row() {
+        let lines = vec!["hello world foo".to_string()];
+        let w = wrap_rows(&lines, Cursor { row: 0, col: 3 }, 8);
+        assert_eq!((w.caret_row, w.caret_col), (0, 3));
+    }
+
+    #[test]
+    fn wrap_labels_title_vs_body_rows_and_keeps_blanks() {
+        let lines = vec!["title".to_string(), String::new(), "body".to_string()];
+        let w = wrap_rows(&lines, Cursor { row: 2, col: 4 }, 20);
+        assert_eq!(w.rows.len(), 3, "blank line is preserved");
+        assert_eq!(w.rows[0].1, 0, "row 0 is the title line");
+        assert_eq!(w.rows[2].1, 2);
+        assert_eq!((w.caret_row, w.caret_col), (2, 4));
     }
 
     #[test]

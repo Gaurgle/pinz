@@ -6,6 +6,7 @@
 //! crate is just the terminal skin over it.
 
 mod app;
+mod editor;
 mod theme;
 mod ui;
 mod view;
