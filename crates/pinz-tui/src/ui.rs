@@ -125,8 +125,7 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     notes.sort_by_key(|n| n.z);
 
     match app.zoom() {
-        ZoomLevel::Survey => draw_far(frame, area, &view, &notes, false, theme),
-        ZoomLevel::Cluster => draw_far(frame, area, &view, &notes, true, theme),
+        ZoomLevel::Cluster => draw_cluster(frame, &view, &notes, theme),
         lod => {
             for note in &notes {
                 if let Some(rect) = view.note_rect(note.position()) {
@@ -180,32 +179,13 @@ fn draw_grid(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-/// Zoomed-out path: a note is a shape, not a widget. `filled` distinguishes the
-/// cluster level (solid colored blocks) from survey (a single colored pip).
-fn draw_far(
-    frame: &mut Frame,
-    area: Rect,
-    view: &View,
-    notes: &[&Note],
-    filled: bool,
-    theme: &Theme,
-) {
+/// Zoomed-out path (cluster level): each note is a solid colored block, no text -
+/// the whole-board overview.
+fn draw_cluster(frame: &mut Frame, view: &View, notes: &[&Note], theme: &Theme) {
     for note in notes {
-        let color = theme.note(note.color);
-        if filled {
-            if let Some(rect) = view.note_rect(note.position()) {
-                frame.render_widget(Block::new().style(Style::new().bg(color)), rect);
-            }
-        } else {
-            let (cx, cy) = view.cell_of(note.center());
-            if cx < 0.0 || cy < 0.0 || cx >= area.width as f64 || cy >= area.height as f64 {
-                continue;
-            }
-            let col = area.x + cx as u16;
-            let row = area.y + cy as u16;
-            if let Some(cell) = frame.buffer_mut().cell_mut((col, row)) {
-                cell.set_symbol("●").set_fg(color);
-            }
+        if let Some(rect) = view.note_rect(note.position()) {
+            let color = theme.note(note.color);
+            frame.render_widget(Block::new().style(Style::new().bg(color)), rect);
         }
     }
 }
@@ -476,6 +456,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
             key_hint("enter", "newline", theme.overlay1),
             key_hint("↑↓←→", "move", theme.overlay1),
+            key_hint("ctrl+⌫", "word", theme.overlay1),
             key_hint("esc", "save", theme.overlay1),
         ]),
         Mode::Nav => Line::from(vec![
@@ -483,6 +464,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key_hint("drag", "move/pan", theme.overlay1),
             key_hint("n", "new", theme.overlay1),
             key_hint("e", "edit", theme.overlay1),
+            key_hint("c", "color", theme.overlay1),
             key_hint("d", "del", theme.overlay1),
             key_hint("tab", "world", theme.overlay1),
             key_hint("t", &format!("theme:{}", theme.name), theme.overlay1),

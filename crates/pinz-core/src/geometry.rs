@@ -21,13 +21,11 @@ pub struct ScreenPoint {
 }
 
 /// Discrete zoom steps. There is no continuous zoom: a terminal is a grid of
-/// cells, so we snap to five levels of detail. The variant also decides how a
+/// cells, so we snap to four levels of detail. The variant also decides how a
 /// note is *rendered* (the LOD ladder in DESIGN.md), not merely its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZoomLevel {
-    /// Notes are dots; you read the board's shape, not its content.
-    Survey,
-    /// Solid colored blocks, no text.
+    /// Solid colored blocks, no text: the whole-board overview.
     Cluster,
     /// Title only.
     Titles,
@@ -39,8 +37,7 @@ pub enum ZoomLevel {
 
 impl ZoomLevel {
     /// Every level, ordered from most zoomed out to most zoomed in.
-    pub const ALL: [ZoomLevel; 5] = [
-        ZoomLevel::Survey,
+    pub const ALL: [ZoomLevel; 4] = [
         ZoomLevel::Cluster,
         ZoomLevel::Titles,
         ZoomLevel::Preview,
@@ -51,7 +48,6 @@ impl ZoomLevel {
     /// These are tuned constants, not a formula; the ratios are what matter.
     pub fn scale(self) -> f64 {
         match self {
-            ZoomLevel::Survey => 0.13,
             ZoomLevel::Cluster => 0.24,
             ZoomLevel::Titles => 0.42,
             ZoomLevel::Preview => 0.68,
@@ -62,7 +58,6 @@ impl ZoomLevel {
     /// Short label for the zoom indicator in the header.
     pub fn label(self) -> &'static str {
         match self {
-            ZoomLevel::Survey => "survey",
             ZoomLevel::Cluster => "cluster",
             ZoomLevel::Titles => "titles",
             ZoomLevel::Preview => "preview",
@@ -70,7 +65,7 @@ impl ZoomLevel {
         }
     }
 
-    /// Position in `ALL`, i.e. 0 for `Survey` up to 4 for `Document`.
+    /// Position in `ALL`, i.e. 0 for `Cluster` up to 3 for `Document`.
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|&z| z == self).expect("every variant is in ALL")
     }
@@ -85,7 +80,7 @@ impl ZoomLevel {
         Self::from_index(self.index() as isize + 1)
     }
 
-    /// One step more zoomed out, clamped at `Survey`.
+    /// One step more zoomed out, clamped at `Cluster`.
     pub fn zoomed_out(self) -> ZoomLevel {
         Self::from_index(self.index() as isize - 1)
     }
@@ -161,7 +156,7 @@ mod tests {
         let cameras = [
             Camera { origin: WorldPoint { x: 0.0, y: 0.0 }, zoom: ZoomLevel::Document },
             Camera { origin: WorldPoint { x: 137.5, y: -42.0 }, zoom: ZoomLevel::Titles },
-            Camera { origin: WorldPoint { x: 900.0, y: 610.0 }, zoom: ZoomLevel::Survey },
+            Camera { origin: WorldPoint { x: 900.0, y: 610.0 }, zoom: ZoomLevel::Cluster },
         ];
         let w = WorldPoint { x: 321.0, y: 654.0 };
         for cam in cameras {
@@ -178,7 +173,7 @@ mod tests {
 
     #[test]
     fn zoom_steps_and_clamps_at_both_ends() {
-        assert_eq!(ZoomLevel::Survey.zoomed_out(), ZoomLevel::Survey);
+        assert_eq!(ZoomLevel::Cluster.zoomed_out(), ZoomLevel::Cluster);
         assert_eq!(ZoomLevel::Document.zoomed_in(), ZoomLevel::Document);
         assert_eq!(ZoomLevel::Titles.zoomed_in(), ZoomLevel::Preview);
         assert_eq!(ZoomLevel::Titles.zoomed_out(), ZoomLevel::Cluster);

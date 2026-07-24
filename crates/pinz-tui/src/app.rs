@@ -157,6 +157,22 @@ impl App {
         };
     }
 
+    /// Step the selected note through the note palette. No-op without a
+    /// selection.
+    fn cycle_note_color(&mut self, forward: bool) {
+        let Some(id) = self.selected else { return };
+        let palette = Color::ALL;
+        let n = palette.len();
+        if let Some(note) = self.note_mut(id) {
+            let cur = palette.iter().position(|&c| c == note.color).unwrap_or(0);
+            note.color = if forward {
+                palette[(cur + 1) % n]
+            } else {
+                palette[(cur + n - 1) % n]
+            };
+        }
+    }
+
     /// Record the viewport the board was last drawn into, and center the board
     /// the first time we know how big it is.
     pub fn set_viewport(&mut self, area: Rect) {
@@ -203,6 +219,8 @@ impl App {
             KeyCode::Char('e') | KeyCode::Enter => self.begin_edit(),
             KeyCode::Char('t') => self.cycle_theme(true),
             KeyCode::Char('T') => self.cycle_theme(false),
+            KeyCode::Char('c') => self.cycle_note_color(true),
+            KeyCode::Char('C') => self.cycle_note_color(false),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
@@ -242,7 +260,14 @@ impl App {
             self.mode = Mode::Nav;
             return;
         };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            // Word / line delete. Ctrl or Alt + Backspace (and Ctrl-W) kill the
+            // word before the cursor; Ctrl-U clears the current line.
+            KeyCode::Backspace if ctrl || alt => editor.delete_word(),
+            KeyCode::Char('w') if ctrl => editor.delete_word(),
+            KeyCode::Char('u') if ctrl => editor.kill_line(),
             KeyCode::Enter => editor.insert_newline(),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
@@ -594,7 +619,7 @@ mod tests {
         for _ in 0..10 {
             a.on_key(key(KeyCode::Char('-')));
         }
-        assert_eq!(a.zoom(), ZoomLevel::Survey);
+        assert_eq!(a.zoom(), ZoomLevel::Cluster);
     }
 
     #[test]
@@ -705,6 +730,36 @@ mod tests {
         a.on_key(key(KeyCode::Char('e')));
         assert_eq!(a.mode(), Mode::Nav);
         assert!(a.editor().is_none());
+    }
+
+    #[test]
+    fn c_cycles_the_selected_notes_color_both_ways() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc)); // save, still selected in Nav
+        let id = a.selected().unwrap();
+        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let before = color_of(&a);
+        a.on_key(key(KeyCode::Char('c')));
+        assert_ne!(color_of(&a), before, "c should change the color");
+        a.on_key(key(KeyCode::Char('C')));
+        assert_eq!(color_of(&a), before, "C should step back");
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_a_word_while_editing() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n'))); // edit, editor holds "new note"
+        a.on_key(KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        a.on_key(key(KeyCode::Esc));
+        let id = a.selected().unwrap();
+        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note.title, "new ");
     }
 
     #[test]

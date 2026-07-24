@@ -31,22 +31,23 @@ stretched in the terminal.
 ## Zoom is a discrete ladder, not a slider
 
 A terminal is a fixed grid of cells; there is no continuous zoom. So zoom snaps
-to five levels, and the level decides **how a note is rendered**, not just its
+to four levels, and the level decides **how a note is rendered**, not just its
 size (its "level of detail"):
 
 | Level    | A note shows            | You can        |
 | -------- | ----------------------- | -------------- |
-| Survey   | a dot                   | pan / survey   |
-| Cluster  | a solid colored block   | move / cluster |
+| Cluster  | a solid colored block   | overview / move |
 | Titles   | its title only          | select         |
 | Preview  | title + body preview    | select         |
 | Document | full note               | **edit**       |
 
+(A fifth, more zoomed-out "dots" level was tried and dropped - a dot conveys too
+little to earn a level; Cluster's colored blocks are the whole-board overview.)
+
 This also implies a **split render path**: zoomed in (Titles..Document), notes
-are real widgets (a box + text, editable via a textarea) placed at their
-projected rect; zoomed out (Survey/Cluster), they are shapes drawn cheaply
-(Ratatui `Canvas`, with braille for any "string between notes"). The projection
-layer chooses the path per level.
+are real widgets (a box + text) placed at their projected rect; zoomed out
+(Cluster), each note is a solid colored block painted straight into the buffer.
+The projection layer chooses the path per level.
 
 ## Ratatui stack
 
@@ -58,10 +59,10 @@ What the renderer settled on (`crates/pinz-tui`):
   core's pixel-tuned zoom ladder to cell proportions. Everything - pan, zoom,
   hit-test - goes through it, so the mouse inverse stays exact. **Done.**
 - Split render path by zoom: zoomed in (titles/preview/document), notes are
-  `Block` + `Paragraph` at their projected `Rect`; zoomed out (cluster/survey),
-  they are cheap shapes painted straight into the buffer. **Done.**
+  `Block` + `Paragraph` at their projected `Rect`; zoomed out (cluster), each is
+  a solid colored block painted straight into the buffer. **Done.**
 - A custom tab strip for worlds and lightweight edge bars as camera-position
-  indicators; a five-dot zoom indicator (not `Gauge` - too heavy). **Done.**
+  indicators; a zoom indicator dot per level (not `Gauge` - too heavy). **Done.**
 - Theming is swappable, not baked in. A `Theme` is the full palette (backgrounds,
   text, one accent, and the eight note accents the core names abstractly); the
   app holds one active theme and every widget reads its color from there, so a

@@ -133,6 +133,34 @@ impl TextEditor {
     pub fn end(&mut self) {
         self.col = char_len(&self.lines[self.row]);
     }
+
+    /// Delete the word before the cursor: any run of spaces, then the word
+    /// itself. At column 0 this falls back to a plain backspace (merging lines).
+    pub fn delete_word(&mut self) {
+        if self.col == 0 {
+            self.backspace();
+            return;
+        }
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        let mut i = self.col;
+        while i > 0 && chars[i - 1] == ' ' {
+            i -= 1;
+        }
+        while i > 0 && chars[i - 1] != ' ' {
+            i -= 1;
+        }
+        let start = byte_at(&self.lines[self.row], i);
+        let end = byte_at(&self.lines[self.row], self.col);
+        self.lines[self.row].replace_range(start..end, "");
+        self.col = i;
+    }
+
+    /// Clear the current line's text, leaving an empty line with the cursor at
+    /// its start.
+    pub fn kill_line(&mut self) {
+        self.lines[self.row].clear();
+        self.col = 0;
+    }
 }
 
 fn char_len(s: &str) -> usize {
@@ -216,5 +244,30 @@ mod tests {
         e.backspace();
         e.backspace();
         assert_eq!(e.text(), "å");
+    }
+
+    #[test]
+    fn delete_word_removes_a_word_and_its_leading_spaces() {
+        let mut e = TextEditor::new("foo bar baz");
+        e.delete_word(); // cursor at end -> "baz"
+        assert_eq!(e.text(), "foo bar ");
+        e.delete_word(); // trailing space then "bar"
+        assert_eq!(e.text(), "foo ");
+    }
+
+    #[test]
+    fn delete_word_at_column_zero_merges_with_previous_line() {
+        let mut e = TextEditor::new("ab\ncd");
+        e.home(); // column 0 of "cd"
+        e.delete_word();
+        assert_eq!(e.text(), "abcd");
+    }
+
+    #[test]
+    fn kill_line_clears_the_current_line() {
+        let mut e = TextEditor::new("hello");
+        e.kill_line();
+        assert_eq!(e.text(), "");
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 0 });
     }
 }
