@@ -86,17 +86,24 @@ What the renderer settled on (`crates/pinz-tui`):
   (`wrap_rows` in `ui.rs`) so text never runs off the edge. Not `tui-textarea` -
   it still targets ratatui 0.29 and would pull a second, incompatible ratatui
   into the tree; the editor we need is small enough to own. **Done.**
-- Storage still runs through the in-memory `Store`; the app calls `save` on exit
-  so a git-backed store drops in without touching the renderer. **Seam ready.**
+- Storage runs through `FileStore`, the file-backed `Store`: `~/pinz` (or
+  `$PINZ_HOME`), one directory per board, one markdown file per pin with its
+  position in a small frontmatter header. The renderer did not change to gain it,
+  which is what the seam was for. **Done.**
+- Saving happens as you work, not only on exit. A corkboard is meant to stay
+  open, so `App` counts changes and the runner writes when that count moves -
+  except mid-drag, which would otherwise rewrite a pin's file on every
+  mouse-move. Git sync stays at the edges (pull on open, commit and push on
+  quit), so a gesture never mints a commit. **Done.**
 - Not `ratatui-3d`: the board is fundamentally 2D; 3D buys nothing here.
 
 ## The seam: storage is swappable
 
 Every tool talks to data through the `Store` trait, never to files or a network
-directly. Today: an in-memory store. Next: a git-backed-files store (local-first,
-offline, versioned - matches the notez philosophy). Later, **if** a real need
-appears, a remote backend is just another `Store` implementation and the tools
-do not change.
+directly. Today: an in-memory store (demo and tests) and `FileStore`, the
+git-backed files store (local-first, offline, versioned - matches the notez
+philosophy). Later, **if** a real need appears, a remote backend is just another
+`Store` implementation and the tools do not change.
 
 Triggers that would justify building the backend (not before):
 
@@ -108,12 +115,37 @@ Triggers that would justify building the backend (not before):
 When that day comes, build it in Rust (e.g. axum + sqlx/Postgres) behind the
 same trait - it doubles as a real backend portfolio piece.
 
-## notez2 compatibility (aligned, not coupled)
+## Pins are separate from notes (one-way, on purpose)
 
-A post-it = a notez2 note (markdown + frontmatter) + spatial metadata (`x`, `y`,
-`z`, `board`, `color`). Keeping the note shape honest to that means a note can
-round-trip to a notez2 file later, without coupling pinz to notez2 now. Separate
-repo for the time being.
+A pin is **not** a notez2 note. It is pinz's own markdown file in pinz's own
+repo, and nothing in pinz reads or writes a notez2 workspace.
+
+The alternative was tempting and wrong: make a board a spatial *view* over the
+notez corpus, so any existing note could be pinned. It buys reach and costs the
+thing that matters. notez2 promises its files round-trip byte-for-byte through
+the CLI, nvim and epoz; a second tool editing those files in place has to parse
+and faithfully reproduce a format it does not own, and position data - which
+changes on every drag - would turn each mouse gesture into a diff in the notes
+repo.
+
+So the relationship runs one way: a pin that turns out to matter **graduates**
+into a notez2 note, via `notez` (or `notez-core` in-process from epoz), leaving
+notez2 the sole owner of its own format. Nothing flows back.
+
+That separation is also why pins live in their own git repo rather than inside
+`~/notez`. Auto-push in a shared repo would carry along unrelated commits, and
+auto-pull would be blocked by unrelated work in progress (`~/notez` runs
+`pull.rebase` with no autostash, so a rebase pull simply refuses while the tree
+is dirty). Its own repo makes pinz's sync entirely pinz's business.
+
+## Sync: stop rather than guess
+
+`pinz sync` is pinz's own command, not a hook into another tool's. Pull on open,
+commit and push on quit, and both on demand. A fetch that fails - offline, no
+remote, no upstream - is not an error: pinz says so and carries on with local
+files. But anything needing a judgement call about whose version of a pin wins
+aborts the rebase, leaves the repo exactly as it was, and hands it back. A
+corkboard has no business merging your notes.
 
 ## Dual target
 

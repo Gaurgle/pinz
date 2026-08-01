@@ -9,17 +9,35 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
   relying only on wrap. (Clarify scope: the board view, or long lines while
   editing a note? We added word-wrap in edit mode, so this is likely the board
   canvas or an opt-out of wrap.)
-
-## Already on the radar (from earlier)
-
 - Vertical scroll when a note's body grows taller than the post-it.
+
+## Boards and pins
+
+- Create, rename and delete boards from inside the app. Today a board is a
+  directory under `~/pinz`, so a new one means `mkdir` by hand.
+- Move a pin to another board without leaving the board view (the store already
+  moves the file when a pin's board changes).
 - Re-center the board on terminal resize.
 - Pile / stacking cascade when notes are dropped together.
-- `Color::from_str` shadows `std::str::FromStr` (clippy) - fold into the
-  persistence pass.
 
-## Parked (needs Andreas's design)
+## Sync
 
-- **notez2 format + persistence.** The git-backed `Store` that writes each note
-  as markdown + frontmatter. Important enough that the format is Andreas's call;
-  don't start unprompted.
+- Surface sync state in the UI. It currently only prints around the TUI, so a
+  conflict reported at startup scrolls past before you reach the board.
+- Sync while running, for a board left open for days. Pins are written to disk
+  immediately, but only pushed on quit.
+- Consider a merge driver for pin files, so two machines editing the *same* pin
+  merge on position instead of stopping. Only worth it if stopping turns out to
+  be annoying in practice.
+
+## Graduating a pin into a note
+
+- One-way promote: turn a pin into a real notez2 note in a chosen scope, leaving
+  notez2 the owner of its own format. Shell out to `notez` from the TUI; call
+  `notez-core` in-process from the epoz tab.
+
+## notez2, separately
+
+- `notez sync`. notez2 has no sync command at all today, so `~/notez` is synced
+  by hand and drifts. That is notez2's problem rather than pinz's, but it is the
+  reason pins got their own repo.

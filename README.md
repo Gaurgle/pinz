@@ -5,11 +5,11 @@ fixed-size post-it notes on a big, pannable, zoomable board - like a real cork
 board, but in a TUI. Notes are movable, stackable, editable, and grouped into
 switchable "worlds".
 
-> Status: **playable.** The core model and projection math are tested, and the
-> terminal UI now draws: a pannable, zoomable board of post-it notes with a
+> Status: **usable.** A pannable, zoomable board of post-it notes with a
 > four-level detail ladder, switchable worlds, and mouse move/select. Notes edit
 > in place through one word-wrapped editor - the first line is the title, the
-> rest the body. Storage is still in-memory, so nothing persists across runs yet.
+> rest the body. Pins persist to their own git repo as you work and sync between
+> machines with `pinz sync`.
 
 ## Why it is built this way
 
@@ -32,8 +32,10 @@ arrow is what lets a terminal app and a desktop app share one brain.
 ## Run it
 
 ```sh
-cargo run --bin pinz            # launches the terminal app (seeded with demo boards)
+cargo run --bin pinz            # opens your board (~/pinz, created on first run)
 cargo run --bin pinz -- nord    # ...starting in a chosen theme
+cargo run --bin pinz -- --demo  # seeded demo boards; writes nothing to disk
+cargo run --bin pinz -- sync    # pull, commit and push the pin repo, then exit
 cargo test                      # runs the core + renderer unit tests
 ```
 
@@ -53,10 +55,51 @@ name: `pinz -- gruvbox` (the match is loose, so `pinz -- light` works too).
 To compare against the intended look, open `design/pinz-demo.html` in a browser -
 the TUI mirrors its interactions in cells.
 
-## Data model, briefly
+## Where pins live
 
-A post-it is a note (title + body) plus spatial metadata (`x`, `y`, `z`,
-`board`, `color`). That extra metadata is exactly what would live in a notez2
-note's frontmatter, so a note can round-trip between pinz and a notez2
-workspace. Today the only store is in-memory; a git-backed store and, later, a
-shared backend are planned implementations behind the same `Store` trait.
+Pins are pinz's own, not notez2 notes. They sit in **`~/pinz`** (override with
+`$PINZ_HOME`): one directory per board, one markdown file per pin.
+
+```
+~/pinz/
+  ideas/
+    2026-08-01-143022-fortnox-integrations.md
+  wavez/
+```
+
+```markdown
+---
+x: 720
+y: 380
+z: 4
+color: green
+---
+# Fortnox integrations
+
+Small automations for Swedish e-commerce bookkeeping.
+```
+
+One file per pin is a sync decision: these files live in a git repo shared
+between machines, and per-pin files conflict only when the *same pin* was edited
+on both ends, where a single board file would conflict on any change at all.
+Saves are incremental - only files whose bytes actually changed get rewritten, so
+dragging a note doesn't churn the history.
+
+## Syncing your machines
+
+`~/pinz` is an ordinary git repo, created on first run. Give it a remote once:
+
+```sh
+cd ~/pinz
+gh repo create pinz-board --private --source=. --push
+```
+
+After that pinz pulls when it opens and commits and pushes when you quit, and
+`pinz sync` does both on demand. It only ever touches its own repo, so it can
+never sweep up or be blocked by work in progress anywhere else. If the same pin
+changed on both machines, pinz **stops**, leaves the repo exactly as it was and
+tells you - resolving that is a human's call, not a corkboard's.
+
+Pins are deliberately separate from your notez2 notes. A pin that turns out to
+matter is meant to graduate into a real note later; nothing here reads or writes
+a notez2 workspace.

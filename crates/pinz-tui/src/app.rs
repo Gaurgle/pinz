@@ -65,6 +65,10 @@ pub struct App {
     color_tick: usize,
     /// Index into [`theme::THEMES`] of the active theme.
     theme_index: usize,
+    /// Bumped by every change to note content or placement. The runner watches
+    /// it to know when the board is worth writing to disk, so a crash costs at
+    /// most the pin you were mid-drag on.
+    revision: u64,
     should_quit: bool,
 }
 
@@ -95,6 +99,7 @@ impl App {
             next_id,
             color_tick: 0,
             theme_index: 0,
+            revision: 0,
             should_quit: false,
         }
     }
@@ -129,6 +134,18 @@ impl App {
     }
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Counter of changes to the boards. Compare it across events to know
+    /// whether anything worth persisting happened.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether a drag is in flight. Saving mid-drag would write a file per
+    /// mouse-move; the runner waits for the gesture to finish.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     /// The active theme (a small `Copy` palette).
@@ -191,7 +208,10 @@ impl App {
         &mut self.boards[self.active]
     }
 
+    /// Mutable access to a note. Every caller here is about to change the note,
+    /// so this is the one place that has to record it.
     fn note_mut(&mut self, id: u64) -> Option<&mut Note> {
+        self.revision += 1;
         self.active_board_mut()
             .notes
             .iter_mut()
@@ -541,6 +561,7 @@ impl App {
             .unwrap_or(0);
         let id = self.next_id;
         self.next_id += 1;
+        self.revision += 1;
         self.active_board_mut().notes.push(Note {
             id,
             title: "new note".to_string(),
@@ -559,6 +580,7 @@ impl App {
 
     fn delete_selected(&mut self) {
         if let Some(id) = self.selected {
+            self.revision += 1;
             self.active_board_mut().notes.retain(|n| n.id != id);
             self.selected = None;
             self.editor = None;
@@ -809,6 +831,36 @@ mod tests {
         let id = a.selected().unwrap();
         let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(note.title, "new Xnote");
+    }
+
+    #[test]
+    fn the_revision_tracks_changes_worth_saving() {
+        let mut a = app();
+        let start = a.revision();
+
+        // Looking around changes nothing on disk.
+        a.on_key(key(KeyCode::Char('+')));
+        a.on_key(key(KeyCode::Tab));
+        a.on_key(key(KeyCode::Right));
+        assert_eq!(a.revision(), start, "panning and zooming are not changes");
+
+        a.on_key(key(KeyCode::Char('n'))); // new note
+        let after_new = a.revision();
+        assert!(after_new > start, "creating a pin is a change");
+
+        for c in "hi".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Esc)); // save the edit
+        let after_edit = a.revision();
+        assert!(after_edit > after_new, "editing a pin is a change");
+
+        a.on_key(key(KeyCode::Char('c'))); // recolor
+        assert!(a.revision() > after_edit, "recoloring is a change");
+
+        let before_delete = a.revision();
+        a.on_key(key(KeyCode::Char('d')));
+        assert!(a.revision() > before_delete, "deleting a pin is a change");
     }
 
     #[test]
