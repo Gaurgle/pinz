@@ -98,7 +98,8 @@ pushed, and `up` reads as *update*, meaning pull, while it pushed.
 
 Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
 **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
-`1`-`9` to switch worlds, `n` for a new note, `e` or `enter` to edit the selected
+`1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab strip for a
+new world, `n` for a new note, `e` or `enter` to edit the selected
 note (first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves),

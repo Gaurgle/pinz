@@ -19,7 +19,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, Prompt, TabKind};
 use crate::editor::Cursor;
 use crate::theme::Theme;
 use crate::view::{CellRect, View};
@@ -35,15 +35,61 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .split(area);
 
-    // Let the app know how big the board is (also triggers first-time centering)
-    // before we draw it.
+    // Let the app know where things landed (this also triggers first-time
+    // centering) before drawing them.
     app.set_viewport(rows[2]);
+    app.set_tabs_area(rows[1]);
 
     let theme = app.theme();
     draw_header(frame, rows[0], app, &theme);
     draw_tabs(frame, rows[1], app, &theme);
     draw_board(frame, rows[2], app, &theme);
     draw_footer(frame, rows[3], app, &theme);
+    if let Some(prompt) = app.prompt() {
+        draw_prompt(frame, rows[2], prompt, &theme);
+    }
+}
+
+/// A small centered dialog. Deliberately a stop-and-answer moment rather than a
+/// keystroke that acts instantly: naming a world deserves an escape hatch.
+fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt, theme: &Theme) {
+    let width = area.width.clamp(12, 44);
+    let height = 6u16.min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {} ", prompt.title),
+            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::new().bg(theme.mantle));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // The typed name with a block caret, then either the error or the hint.
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(prompt.input.clone(), Style::new().fg(theme.text)),
+            Span::styled(" ", Style::new().fg(theme.text).add_modifier(Modifier::REVERSED)),
+        ]),
+        Line::raw(""),
+    ];
+    lines.push(match &prompt.error {
+        Some(error) => Line::from(Span::styled(error.clone(), Style::new().fg(theme.note(pinz_core::Color::Red)))),
+        None => Line::from(Span::styled(prompt.hint, Style::new().fg(theme.overlay0))),
+    });
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -86,25 +132,35 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
+/// The world tab strip, plus the `+` that opens the new-world prompt.
+///
+/// Every span comes from [`App::tabs`], which is also what a click is tested
+/// against - so what you see and what you can hit cannot drift apart.
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let mut spans = vec![Span::raw(" ")];
-    for (i, board) in app.boards().iter().enumerate() {
-        let active = i == app.active_index();
-        let (fg, modifier) = if active {
-            (theme.text, Modifier::BOLD)
-        } else {
-            (theme.subtext, Modifier::empty())
-        };
-        let marker = if active { "▎" } else { " " };
-        spans.push(Span::styled(marker, Style::new().fg(theme.accent)));
-        spans.push(Span::styled(
-            format!("{} ", board.name),
-            Style::new().fg(fg).add_modifier(modifier),
-        ));
-        spans.push(Span::styled(
-            format!("{}  ", board.notes.len()),
-            Style::new().fg(theme.overlay0),
-        ));
+    for tab in app.tabs() {
+        match tab.kind {
+            TabKind::World {
+                name, notes, active, ..
+            } => {
+                let (fg, modifier) = if active {
+                    (theme.text, Modifier::BOLD)
+                } else {
+                    (theme.subtext, Modifier::empty())
+                };
+                let marker = if active { "▎" } else { " " };
+                spans.push(Span::styled(marker, Style::new().fg(theme.accent)));
+                spans.push(Span::styled(
+                    format!("{name} "),
+                    Style::new().fg(fg).add_modifier(modifier),
+                ));
+                spans.push(Span::styled(
+                    format!("{notes}  "),
+                    Style::new().fg(theme.overlay0),
+                ));
+            }
+            TabKind::New => spans.push(Span::styled(" + ", Style::new().fg(theme.overlay1))),
+        }
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.mantle)),
@@ -515,6 +571,15 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let hint = match app.mode() {
+        Mode::Prompt => Line::from(vec![
+            Span::styled(
+                "naming a world",
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
+            key_hint("enter", "create", theme.overlay1),
+            key_hint("esc", "cancel", theme.overlay1),
+        ]),
         Mode::Edit => Line::from(vec![
             Span::styled(
                 "editing",
@@ -537,6 +602,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key_hint("c", "color", theme.overlay1),
             key_hint("d", "del", theme.overlay1),
             key_hint("tab", "world", theme.overlay1),
+            key_hint("w", "+world", theme.overlay1),
             key_hint("t", &format!("theme:{}", theme.name), theme.overlay1),
             key_hint("q", "quit", theme.overlay1),
         ]),
@@ -754,6 +820,39 @@ mod tests {
             narrowed > 0,
             "the note never reached the edge; the test proves nothing:\n{cut:#?}"
         );
+    }
+
+    #[test]
+    fn the_tab_strip_offers_a_plus_and_the_prompt_draws_over_the_board() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(90, 22)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(
+            buffer_text(&terminal.backend().buffer().clone()).contains("+"),
+            "the tab strip should offer a + to add a world"
+        );
+
+        let press = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        app.on_key(press(KeyCode::Char('w')));
+        for c in "reading".chars() {
+            app.on_key(press(KeyCode::Char(c)));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("new world"), "prompt title missing:\n{text}");
+        assert!(text.contains("reading"), "typed name missing:\n{text}");
+        assert!(text.contains("esc to cancel"), "hint missing:\n{text}");
+
+        // A refused name shows why, in place of the hint, and keeps the text.
+        app.on_key(press(KeyCode::Char('/')));
+        app.on_key(press(KeyCode::Enter));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("no slashes"), "reason missing:\n{text}");
+        assert!(text.contains("reading/"), "typed name should survive:\n{text}");
+        assert!(!text.contains("esc to cancel"), "the reason replaces the hint");
     }
 
     #[test]

@@ -13,8 +13,8 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 
 ## Boards and pins
 
-- Create, rename and delete boards from inside the app. Today a board is a
-  directory under `~/pinz`, so a new one means `mkdir` by hand.
+- Rename and delete boards from inside the app. Creating one is done (`w`, or
+  the `+` in the tab strip); the other two still mean touching `~/pinz` by hand.
 - Move a pin to another board without leaving the board view (the store already
   moves the file when a pin's board changes).
 - Re-center the board on terminal resize.

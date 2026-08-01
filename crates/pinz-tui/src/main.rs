@@ -21,7 +21,7 @@ use std::panic;
 use std::path::PathBuf;
 
 use app::App;
-use pinz_core::{Board, FileStore, Store, Sync, SyncOutcome};
+use pinz_core::{Board, Color, FileStore, Note, Store, Sync, SyncOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
@@ -34,6 +34,25 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 /// The board a brand new pin repo starts with, so there is always a tab.
 const FIRST_BOARD: &str = "ideas";
+
+/// The first world, carrying one blank pin.
+///
+/// An empty board is a wall with nothing on it and no clue what to do; one
+/// blank pin is a corkboard with a note already pinned, waiting to be written
+/// on. Press `e` and start typing.
+fn first_board() -> Board {
+    let mut board = Board::new(FIRST_BOARD);
+    board.notes.push(Note {
+        id: 1,
+        title: String::new(),
+        body: String::new(),
+        x: 0.0,
+        y: 0.0,
+        z: 1,
+        color: Color::Yellow,
+    });
+    board
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -183,7 +202,7 @@ fn git_command(command: Command) -> io::Result<()> {
     let boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
     if boards.is_empty() {
         store
-            .save(&[Board::new(FIRST_BOARD)])
+            .save(&[first_board()])
             .map_err(|e| io::Error::other(e.to_string()))?;
     }
 
@@ -271,7 +290,7 @@ fn run_app(opts: Options) -> io::Result<()> {
 
     let mut boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
     if boards.is_empty() {
-        boards.push(Board::new(FIRST_BOARD));
+        boards.push(first_board());
     }
     let mut app = App::new(boards);
     if let Some(name) = &opts.theme {
@@ -449,6 +468,15 @@ mod tests {
         assert_eq!(o.command, Command::Run);
         assert_eq!(o.theme, None);
         assert!(o.sync, "sync is on unless turned off");
+    }
+
+    #[test]
+    fn a_fresh_board_starts_with_one_blank_pin() {
+        let board = first_board();
+        assert_eq!(board.name, FIRST_BOARD);
+        assert_eq!(board.notes.len(), 1, "one pin, ready to be written on");
+        assert_eq!(board.notes[0].title, "");
+        assert_eq!(board.notes[0].body, "");
     }
 
     #[test]

@@ -21,6 +21,11 @@ const PAN_CELLS: f64 = 4.0;
 /// How far past the note cloud you may pan before hitting the soft wall, in
 /// world units. Enough to breathe; not enough to lose the board.
 const PAN_MARGIN: f64 = 80.0;
+/// Width of the `+` tab, drawn as " + ".
+const NEW_TAB_WIDTH: u16 = 3;
+/// Longest world name we will take. A world is a directory, so this is about
+/// keeping paths sane rather than anything deeper.
+const BOARD_NAME_MAX: usize = 40;
 
 /// What the keyboard is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +35,44 @@ pub enum Mode {
     /// Editing the selected note as one buffer: line 1 is the title, the rest
     /// is the body.
     Edit,
+    /// Answering a prompt. Not everything should be one keystroke away - naming
+    /// a world is worth a moment's thought and an escape hatch.
+    Prompt,
+}
+
+/// One cell of the world tab strip. The app owns the layout so that clicking a
+/// tab and drawing it cannot drift apart: `ui` renders exactly these spans, and
+/// [`App::on_mouse`] hit-tests the same ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    pub kind: TabKind,
+    /// Column offset from the left of the tab strip, and how wide it is.
+    pub x: u16,
+    pub width: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabKind {
+    World {
+        index: usize,
+        name: String,
+        notes: usize,
+        active: bool,
+    },
+    /// The `+` that opens the new-world prompt.
+    New,
+}
+
+/// A question the app is waiting on an answer to.
+#[derive(Debug, Clone)]
+pub struct Prompt {
+    pub title: &'static str,
+    pub hint: &'static str,
+    /// What has been typed so far.
+    pub input: String,
+    /// Set when the last attempt to confirm was refused, so the reason can be
+    /// shown without throwing away what was typed.
+    pub error: Option<String>,
 }
 
 /// A drag in progress, started on mouse-down.
@@ -59,6 +102,10 @@ pub struct App {
     /// The board viewport from the last render, needed to interpret mouse
     /// positions and to center content. Zero until the first draw.
     viewport: Rect,
+    /// The tab strip from the last render, so a click can land on a world.
+    tabs: Rect,
+    /// The open prompt, if any. Present exactly when the mode is [`Mode::Prompt`].
+    prompt: Option<Prompt>,
     /// Have we centered the current board on screen yet?
     centered: bool,
     next_id: u64,
@@ -95,6 +142,8 @@ impl App {
             editor: None,
             drag: None,
             viewport: Rect::default(),
+            tabs: Rect::default(),
+            prompt: None,
             centered: false,
             next_id,
             color_tick: 0,
@@ -109,6 +158,9 @@ impl App {
     pub fn boards(&self) -> &[Board] {
         &self.boards
     }
+    /// Index of the active world. The tab strip carries its own `active` flag,
+    /// so this is here for tests and for symmetry with [`App::active_board`].
+    #[allow(dead_code)]
     pub fn active_index(&self) -> usize {
         self.active
     }
@@ -146,6 +198,44 @@ impl App {
     /// mouse-move; the runner waits for the gesture to finish.
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The open prompt, for the renderer to draw. `Some` only in [`Mode::Prompt`].
+    pub fn prompt(&self) -> Option<&Prompt> {
+        self.prompt.as_ref()
+    }
+
+    /// Record where the tab strip was drawn, so clicks on it can be resolved.
+    pub fn set_tabs_area(&mut self, area: Rect) {
+        self.tabs = area;
+    }
+
+    /// The tab strip: one span per world, then the `+`. Widths here are what the
+    /// renderer must draw, so hit-testing stays exact.
+    pub fn tabs(&self) -> Vec<Tab> {
+        let mut out = Vec::with_capacity(self.boards.len() + 1);
+        let mut x = 1; // the strip opens with a space
+        for (index, board) in self.boards.iter().enumerate() {
+            // marker + "name " + "count  "
+            let width = 1 + board.name.chars().count() as u16 + 1 + digits(board.notes.len()) + 2;
+            out.push(Tab {
+                kind: TabKind::World {
+                    index,
+                    name: board.name.clone(),
+                    notes: board.notes.len(),
+                    active: index == self.active,
+                },
+                x,
+                width,
+            });
+            x += width;
+        }
+        out.push(Tab {
+            kind: TabKind::New,
+            x,
+            width: NEW_TAB_WIDTH,
+        });
+        out
     }
 
     /// The active theme (a small `Copy` palette).
@@ -226,8 +316,10 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if self.mode == Mode::Edit {
-            return self.edit_key(key);
+        match self.mode {
+            Mode::Edit => return self.edit_key(key),
+            Mode::Prompt => return self.prompt_key(key),
+            Mode::Nav => {}
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -241,6 +333,7 @@ impl App {
             KeyCode::Char('T') => self.cycle_theme(false),
             KeyCode::Char('c') => self.cycle_note_color(true),
             KeyCode::Char('C') => self.cycle_note_color(false),
+            KeyCode::Char('w') => self.begin_new_world(),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
@@ -334,6 +427,80 @@ impl App {
         self.mode = Mode::Nav;
     }
 
+    /// Open the prompt that names a new world.
+    fn begin_new_world(&mut self) {
+        self.prompt = Some(Prompt {
+            title: "new world",
+            hint: "enter to create · esc to cancel",
+            input: String::new(),
+            error: None,
+        });
+        self.mode = Mode::Prompt;
+    }
+
+    fn prompt_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Some(prompt) = self.prompt.as_mut() else {
+            self.mode = Mode::Nav;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.mode = Mode::Nav;
+            }
+            KeyCode::Enter => self.confirm_prompt(),
+            KeyCode::Backspace if ctrl || alt => {
+                prompt.input.clear();
+                prompt.error = None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                prompt.input.clear();
+                prompt.error = None;
+            }
+            KeyCode::Backspace => {
+                prompt.input.pop();
+                prompt.error = None;
+            }
+            // As in the note editor, a modified key that got this far is a chord
+            // we do not bind, never text.
+            KeyCode::Char(_) if ctrl || alt => {}
+            KeyCode::Char(c) => {
+                if prompt.input.chars().count() < BOARD_NAME_MAX {
+                    prompt.input.push(c);
+                }
+                prompt.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Act on the prompt's answer. A refusal keeps the prompt open with the
+    /// typed text intact and the reason shown - retyping a name because of a
+    /// stray slash would be its own small insult.
+    fn confirm_prompt(&mut self) {
+        let Some(prompt) = self.prompt.as_mut() else { return };
+        let name = prompt.input.trim().to_string();
+        match validate_board_name(&name) {
+            Err(why) => prompt.error = Some(why),
+            Ok(()) => {
+                // An existing world is switched to rather than duplicated: two
+                // directories cannot share a name anyway.
+                match self.boards.iter().position(|b| b.name == name) {
+                    Some(index) => self.switch_world(index),
+                    None => {
+                        self.boards.push(Board::new(name));
+                        self.revision += 1;
+                        self.switch_world(self.boards.len() - 1);
+                    }
+                }
+                self.prompt = None;
+                self.mode = Mode::Nav;
+            }
+        }
+    }
+
     // ---- mouse ----
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -352,6 +519,10 @@ impl App {
     }
 
     fn mouse_down(&mut self, col: u16, row: u16) {
+        if self.tabs.contains((col, row).into()) {
+            self.click_tab(col);
+            return;
+        }
         if !self.in_viewport(col, row) {
             return;
         }
@@ -374,6 +545,35 @@ impl App {
                 row,
                 origin: self.camera.origin,
             });
+        }
+    }
+
+    /// Resolve a click on the tab strip: a world switches to it, the `+` opens
+    /// the new-world prompt, and a gap does nothing.
+    fn click_tab(&mut self, col: u16) {
+        let Some(offset) = col.checked_sub(self.tabs.x) else {
+            return;
+        };
+        let Some(tab) = self
+            .tabs()
+            .into_iter()
+            .find(|t| offset >= t.x && offset < t.x + t.width)
+        else {
+            return;
+        };
+        // A click anywhere is also an answer of "not now" to an open prompt.
+        if self.mode == Mode::Prompt {
+            self.prompt = None;
+            self.mode = Mode::Nav;
+        }
+        match tab.kind {
+            TabKind::World { index, .. } => {
+                if self.mode == Mode::Edit {
+                    self.commit_edit();
+                }
+                self.switch_world(index);
+            }
+            TabKind::New => self.begin_new_world(),
         }
     }
 
@@ -533,6 +733,7 @@ impl App {
         self.selected = None;
         self.mode = Mode::Nav;
         self.editor = None;
+        self.prompt = None;
         self.centered = false; // re-center on the new board's content
     }
 
@@ -587,6 +788,34 @@ impl App {
             self.mode = Mode::Nav;
         }
     }
+}
+
+/// Decimal digits in `n`, for laying out a tab's note count.
+fn digits(n: usize) -> u16 {
+    let mut n = n / 10;
+    let mut d = 1;
+    while n > 0 {
+        n /= 10;
+        d += 1;
+    }
+    d
+}
+
+/// A world is a directory, so its name has to survive being one.
+fn validate_board_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("give it a name".into());
+    }
+    if name.starts_with('.') {
+        return Err("cannot start with a dot".into());
+    }
+    if name.chars().any(|c| matches!(c, '/' | '\\')) {
+        return Err("no slashes - a world is one directory".into());
+    }
+    if name.chars().count() > BOARD_NAME_MAX {
+        return Err(format!("keep it under {BOARD_NAME_MAX} characters"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -861,6 +1090,146 @@ mod tests {
         let before_delete = a.revision();
         a.on_key(key(KeyCode::Char('d')));
         assert!(a.revision() > before_delete, "deleting a pin is a change");
+    }
+
+    #[test]
+    fn w_opens_the_new_world_prompt_and_esc_backs_out() {
+        let mut a = app();
+        let before = a.boards().len();
+        a.on_key(key(KeyCode::Char('w')));
+        assert_eq!(a.mode(), Mode::Prompt);
+        assert!(a.prompt().is_some());
+
+        for c in "wavez".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(a.prompt().unwrap().input, "wavez");
+
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.mode(), Mode::Nav, "esc backs out");
+        assert!(a.prompt().is_none());
+        assert_eq!(a.boards().len(), before, "nothing was created");
+    }
+
+    #[test]
+    fn confirming_the_prompt_creates_the_world_and_switches_to_it() {
+        let mut a = app();
+        let before = a.boards().len();
+        a.on_key(key(KeyCode::Char('w')));
+        for c in "reading".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode(), Mode::Nav);
+        assert_eq!(a.boards().len(), before + 1);
+        assert_eq!(a.active_board().name, "reading", "lands on the new world");
+        assert!(a.active_board().notes.is_empty());
+    }
+
+    #[test]
+    fn a_refused_name_keeps_the_prompt_and_what_was_typed() {
+        let mut a = app();
+        let before = a.boards().len();
+        a.on_key(key(KeyCode::Char('w')));
+        for c in "a/b".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode(), Mode::Prompt, "a bad name does not close the prompt");
+        let prompt = a.prompt().unwrap();
+        assert_eq!(prompt.input, "a/b", "the typed name survives");
+        assert!(prompt.error.is_some(), "and it says why");
+        assert_eq!(a.boards().len(), before);
+
+        // Fixing it in place works.
+        a.on_key(key(KeyCode::Backspace));
+        a.on_key(key(KeyCode::Backspace));
+        a.on_key(key(KeyCode::Char('b')));
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.active_board().name, "ab");
+    }
+
+    #[test]
+    fn naming_an_existing_world_switches_instead_of_duplicating() {
+        let mut a = app();
+        let before = a.boards().len();
+        let existing = a.boards()[1].name.clone();
+        a.on_key(key(KeyCode::Char('w')));
+        for c in existing.chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.boards().len(), before, "two directories cannot share a name");
+        assert_eq!(a.active_board().name, existing);
+    }
+
+    #[test]
+    fn an_empty_or_dotted_name_is_refused() {
+        for bad in ["", "   ", ".hidden"] {
+            let mut a = app();
+            let before = a.boards().len();
+            a.on_key(key(KeyCode::Char('w')));
+            for c in bad.chars() {
+                a.on_key(key(KeyCode::Char(c)));
+            }
+            a.on_key(key(KeyCode::Enter));
+            assert_eq!(a.mode(), Mode::Prompt, "{bad:?} should be refused");
+            assert_eq!(a.boards().len(), before);
+        }
+    }
+
+    #[test]
+    fn the_tab_strip_ends_with_a_plus_and_spans_do_not_overlap() {
+        let a = app();
+        let tabs = a.tabs();
+        assert_eq!(tabs.len(), a.boards().len() + 1);
+        assert!(matches!(tabs.last().unwrap().kind, TabKind::New));
+
+        // Each span starts where the previous one ended: this is what makes a
+        // click land on the tab it looks like it landed on.
+        for pair in tabs.windows(2) {
+            assert_eq!(pair[0].x + pair[0].width, pair[1].x, "gap or overlap in the strip");
+        }
+        match &tabs[0].kind {
+            TabKind::World { index, active, .. } => {
+                assert_eq!(*index, 0);
+                assert!(active, "the first world starts active");
+            }
+            _ => panic!("expected a world first"),
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_worlds_and_clicking_plus_opens_the_prompt() {
+        let mut a = app();
+        a.set_tabs_area(Rect { x: 0, y: 1, width: 100, height: 1 });
+        let tabs = a.tabs();
+
+        // The second world's tab.
+        let second = &tabs[1];
+        a.on_mouse(mouse_down(second.x, 1));
+        assert_eq!(a.active_index(), 1, "clicked the second world");
+
+        // The + at the end.
+        let plus = a.tabs().last().unwrap().clone();
+        a.on_mouse(mouse_down(plus.x + 1, 1));
+        assert_eq!(a.mode(), Mode::Prompt, "the + opens the new-world prompt");
+    }
+
+    #[test]
+    fn a_prompt_takes_text_not_board_shortcuts() {
+        // In the prompt, "n" and "q" are letters, not new-note and quit.
+        let mut a = app();
+        let before = a.active_board().notes.len();
+        a.on_key(key(KeyCode::Char('w')));
+        for c in "nq".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(a.prompt().unwrap().input, "nq");
+        assert!(!a.should_quit(), "q must not quit while naming");
+        assert_eq!(a.boards()[0].notes.len(), before, "n must not add a pin");
     }
 
     #[test]
