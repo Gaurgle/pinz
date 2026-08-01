@@ -11,17 +11,18 @@
 
 use pinz_core::{Note, WorldPoint, ZoomLevel};
 use ratatui::{
+    buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap},
     Frame,
 };
 
 use crate::app::{App, Mode};
 use crate::editor::Cursor;
 use crate::theme::Theme;
-use crate::view::View;
+use crate::view::{CellRect, View};
 
 /// Paint the whole app: header, tabs, board, footer.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -128,8 +129,9 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ZoomLevel::Cluster => draw_cluster(frame, &view, &notes, theme),
         lod => {
             for note in &notes {
-                if let Some(rect) = view.note_rect(note.position()) {
-                    draw_note_widget(frame, rect, note, lod, app, theme);
+                let cells = view.note_cells(note.position());
+                if cells.clip(area).is_some() {
+                    draw_note_widget(frame, cells, area, note, lod, app, theme);
                 }
             }
         }
@@ -192,9 +194,15 @@ fn draw_cluster(frame: &mut Frame, view: &View, notes: &[&Note], theme: &Theme) 
 
 /// Zoomed-in path: a real post-it - bordered, colored, with text sized to the
 /// zoom level. The document level is where the selected note is editable.
+///
+/// `cells` is the note's *full* footprint even when it hangs off the viewport;
+/// the note is laid out at that size and only then cut down to `area`. That is
+/// what makes it behave like paper sliding under the window frame instead of a
+/// box that reflows its text as it reaches the edge.
 fn draw_note_widget(
     frame: &mut Frame,
-    rect: Rect,
+    cells: CellRect,
+    area: Rect,
     note: &Note,
     lod: ZoomLevel,
     app: &App,
@@ -216,38 +224,92 @@ fn draw_note_widget(
         .title(Span::styled("📌", Style::new().fg(theme.note_fg)))
         .style(Style::new().bg(color).fg(theme.note_fg));
 
+    // Everything below paints into note-local coordinates: a rect the size of the
+    // whole note, at (0,0). `paint_clipped` puts the visible window of it on
+    // screen.
+    let full = Rect {
+        x: 0,
+        y: 0,
+        width: cells.width,
+        height: cells.height,
+    };
     // Compute the inner area before the block is consumed by render. Clear first
     // so the note is opaque: a Block only restyles cells, it won't wipe the grid
     // dots (or a note underneath) showing through its interior.
-    let inner = block.inner(rect);
-    frame.render_widget(Clear, rect);
-    frame.render_widget(block, rect);
-    if inner.width == 0 || inner.height == 0 {
+    let inner = block.inner(full);
+
+    paint_clipped(frame, cells, area, |buf| {
+        Clear.render(full, buf);
+        block.render(full, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        // While editing, the whole note is one live buffer (line 1 = title, the
+        // rest = body), word-wrapped to the inner width with the cursor mapped
+        // through the wrap so text never runs off the right edge.
+        if let Some(editor) = editing.then(|| app.editor()).flatten() {
+            let lines =
+                editor_lines(editor.lines(), editor.cursor(), inner.width as usize, theme.note_fg);
+            Paragraph::new(lines).render(inner, buf);
+            return;
+        }
+
+        // Not editing: the title, then (from preview level up) the body. The body
+        // is split on its own newlines first - a Line renders an embedded '\n' as
+        // nothing, so passing the raw body would silently glue the rows together
+        // the moment the editor closes.
+        let mut lines = vec![Line::from(Span::styled(
+            note.title.clone(),
+            Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
+        ))];
+        if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
+            lines.push(Line::raw(""));
+            lines.extend(body_lines(&note.body, theme.note_fg));
+        }
+        Paragraph::new(lines).wrap(Wrap { trim: true }).render(inner, buf);
+    });
+}
+
+/// Paint `render` into an off-screen buffer the size of `cells`, then copy the
+/// part of it that falls inside `area` onto the frame.
+///
+/// The detour through a private buffer is the whole point: widgets lay
+/// themselves out to the rect they are given, so handing one a rect already
+/// trimmed to the screen edge would re-wrap its text every time the note moved.
+/// Here the layout is computed once at full size and the edge only ever cuts.
+fn paint_clipped(
+    frame: &mut Frame,
+    cells: CellRect,
+    area: Rect,
+    render: impl FnOnce(&mut Buffer),
+) {
+    let Some(visible) = cells.clip(area) else {
+        return;
+    };
+    if cells.width == 0 || cells.height == 0 {
         return;
     }
+    let mut local = Buffer::empty(Rect {
+        x: 0,
+        y: 0,
+        width: cells.width,
+        height: cells.height,
+    });
+    render(&mut local);
 
-    // While editing, the whole note is one live buffer (line 1 = title, the rest
-    // = body), word-wrapped to the inner width with the cursor mapped through
-    // the wrap so text never runs off the right edge.
-    if let Some(editor) = editing.then(|| app.editor()).flatten() {
-        let lines = editor_lines(editor.lines(), editor.cursor(), inner.width as usize, theme.note_fg);
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
+    // Offset of the visible window within the note.
+    let dx = (visible.x as i64 - cells.x) as u16;
+    let dy = (visible.y as i64 - cells.y) as u16;
+    let buf = frame.buffer_mut();
+    for row in 0..visible.height {
+        for col in 0..visible.width {
+            let src = local[(dx + col, dy + row)].clone();
+            if let Some(dst) = buf.cell_mut((visible.x + col, visible.y + row)) {
+                *dst = src;
+            }
+        }
     }
-
-    // Not editing: the title, then (from preview level up) the body. The body is
-    // split on its own newlines first - a Line renders an embedded '\n' as
-    // nothing, so passing the raw body would silently glue the rows together the
-    // moment the editor closes.
-    let mut lines = vec![Line::from(Span::styled(
-        note.title.clone(),
-        Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
-    ))];
-    if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
-        lines.push(Line::raw(""));
-        lines.extend(body_lines(&note.body, theme.note_fg));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 /// A note body as one [`Line`] per hard line break, so the rows a writer typed
@@ -613,6 +675,87 @@ mod tests {
         let a = rows.iter().position(|r| r.contains("AAA")).unwrap();
         let b = rows.iter().position(|r| r.contains("BBB")).unwrap();
         assert_eq!(b - a, 2, "the blank line between them is preserved");
+    }
+
+    /// Draw a single wordy note at document zoom on a terminal barely wider than
+    /// the note, then pan right `presses` times so the note hangs off the left
+    /// edge. Returns the board's text rows.
+    fn panned_board_rows(presses: usize) -> Vec<String> {
+        let press = |code| {
+            ratatui::crossterm::event::KeyEvent::new(
+                code,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            )
+        };
+        let mut store = MemoryStore::seeded();
+        let mut boards = store.load().unwrap();
+        boards[0].notes.clear();
+        boards[0].notes.push(pinz_core::Note {
+            id: 900,
+            title: "TITLE".into(),
+            body: "alpha beta gamma delta epsilon zeta eta theta".into(),
+            x: 0.0,
+            y: 0.0,
+            z: 1,
+            color: pinz_core::Color::Yellow,
+        });
+        let mut app = App::new(boards);
+        let mut terminal = Terminal::new(TestBackend::new(44, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // viewport + centering
+        for _ in 0..4 {
+            app.on_key(press(ratatui::crossterm::event::KeyCode::Char('+')));
+        }
+        for _ in 0..presses {
+            app.on_key(press(ratatui::crossterm::event::KeyCode::Right));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        buffer_text(&terminal.backend().buffer().clone())
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The text inside a note's borders on one screen row: between the two
+    /// border glyphs when both are on screen, otherwise whatever is left of the
+    /// single one. Empty for rows that aren't part of a note.
+    fn note_interior(row: &str) -> String {
+        let Some(right) = row.rfind('│') else {
+            return String::new();
+        };
+        let seg = &row[..right];
+        match seg.rfind('│') {
+            Some(left) => seg[left + '│'.len_utf8()..].trim().to_string(),
+            None => seg.trim().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_note_at_the_edge_does_not_reflow_its_text() {
+        // Same note, same camera height, panned so more of it hangs off the left
+        // edge. Panning may only ever *cut* a row - never re-wrap it into a new
+        // shape - so each row still on screen must be a tail of what it was.
+        let whole = panned_board_rows(0);
+        let cut = panned_board_rows(8);
+        assert_eq!(whole.len(), cut.len(), "same terminal, same row count");
+
+        let mut narrowed = 0;
+        for (whole_row, cut_row) in whole.iter().zip(&cut) {
+            let (before, after) = (note_interior(whole_row), note_interior(cut_row));
+            if after.is_empty() {
+                continue; // row is blank, or cut away entirely - both are fine
+            }
+            assert!(
+                before.ends_with(&after),
+                "row re-wrapped at the edge: {after:?} is not the tail of {before:?}"
+            );
+            if before != after {
+                narrowed += 1;
+            }
+        }
+        assert!(
+            narrowed > 0,
+            "the note never reached the edge; the test proves nothing:\n{cut:#?}"
+        );
     }
 
     #[test]

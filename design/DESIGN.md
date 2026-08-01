@@ -61,6 +61,15 @@ What the renderer settled on (`crates/pinz-tui`):
 - Split render path by zoom: zoomed in (titles/preview/document), notes are
   `Block` + `Paragraph` at their projected `Rect`; zoomed out (cluster), each is
   a solid colored block painted straight into the buffer. **Done.**
+- A note is laid out at its full size and clipped at paint time, never before.
+  Widgets fit themselves to the rect they are handed, so drawing a partly
+  off-screen note into a rect already trimmed to the viewport made it re-wrap its
+  text as it approached an edge - the board behaved like a set of shrinking boxes
+  rather than paper under a window frame. Instead `View::note_cells` returns the
+  full footprint (signed, so it can start left of or above the viewport), the
+  note renders into a private buffer of that size, and only the visible window is
+  copied onto the frame. The layout is a function of the note, not of where the
+  camera happens to be. **Done.**
 - A custom tab strip for worlds and lightweight edge bars as camera-position
   indicators; a zoom indicator dot per level (not `Gauge` - too heavy). **Done.**
 - Theming is swappable, not baked in. A `Theme` is the full palette (backgrounds,

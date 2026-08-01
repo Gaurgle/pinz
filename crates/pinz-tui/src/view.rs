@@ -83,44 +83,61 @@ impl View {
         (w * CELL_UNIT, h * CELL_UNIT)
     }
 
-    /// The terminal rect a note occupies, clipped to the viewport. `None` when
-    /// the note is fully off-screen.
-    pub fn note_rect(&self, top_left: WorldPoint) -> Option<Rect> {
+    /// The note's full terminal footprint, unclipped - the top-left may sit
+    /// outside the viewport, or left of it entirely. This is the rect a note's
+    /// *contents* are laid out in, so the layout doesn't change as the note
+    /// slides past an edge.
+    pub fn note_cells(&self, top_left: WorldPoint) -> CellRect {
         let (cx, cy) = self.cell_of(top_left);
         let (w, h) = self.note_size();
         let x0 = self.area.x as f64 + cx;
         let y0 = self.area.y as f64 + cy;
-        clip(x0, y0, w, h, self.area)
+        CellRect {
+            x: x0.round() as i64,
+            y: y0.round() as i64,
+            width: ((x0 + w).round() as i64 - x0.round() as i64).max(0) as u16,
+            height: ((y0 + h).round() as i64 - y0.round() as i64).max(0) as u16,
+        }
+    }
+
+    /// The terminal rect a note occupies, clipped to the viewport. `None` when
+    /// the note is fully off-screen. For anything with contents, prefer
+    /// [`View::note_cells`] and clip at paint time instead.
+    pub fn note_rect(&self, top_left: WorldPoint) -> Option<Rect> {
+        self.note_cells(top_left).clip(self.area)
     }
 }
 
-/// Intersect a fractional rect (in terminal coordinates) with the viewport,
-/// rounding to whole cells. Returns `None` if nothing is left.
-fn clip(x0: f64, y0: f64, w: f64, h: f64, area: Rect) -> Option<Rect> {
-    let ax0 = area.x as i64;
-    let ay0 = area.y as i64;
-    let ax1 = ax0 + area.width as i64;
-    let ay1 = ay0 + area.height as i64;
+/// A note's placement in terminal cells before clipping. Separate from [`Rect`],
+/// whose unsigned origin can't express a note whose top-left has slid off the
+/// left or top edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellRect {
+    pub x: i64,
+    pub y: i64,
+    pub width: u16,
+    pub height: u16,
+}
 
-    let nx0 = x0.round() as i64;
-    let ny0 = y0.round() as i64;
-    let nx1 = (x0 + w).round() as i64;
-    let ny1 = (y0 + h).round() as i64;
-
-    let cx0 = nx0.max(ax0);
-    let cy0 = ny0.max(ay0);
-    let cx1 = nx1.min(ax1);
-    let cy1 = ny1.min(ay1);
-
-    if cx1 <= cx0 || cy1 <= cy0 {
-        return None;
+impl CellRect {
+    /// The part of this rect inside `area`, or `None` if none of it is.
+    pub fn clip(&self, area: Rect) -> Option<Rect> {
+        let ax0 = area.x as i64;
+        let ay0 = area.y as i64;
+        let cx0 = self.x.max(ax0);
+        let cy0 = self.y.max(ay0);
+        let cx1 = (self.x + self.width as i64).min(ax0 + area.width as i64);
+        let cy1 = (self.y + self.height as i64).min(ay0 + area.height as i64);
+        if cx1 <= cx0 || cy1 <= cy0 {
+            return None;
+        }
+        Some(Rect {
+            x: cx0 as u16,
+            y: cy0 as u16,
+            width: (cx1 - cx0) as u16,
+            height: (cy1 - cy0) as u16,
+        })
     }
-    Some(Rect {
-        x: cx0 as u16,
-        y: cy0 as u16,
-        width: (cx1 - cx0) as u16,
-        height: (cy1 - cy0) as u16,
-    })
 }
 
 #[cfg(test)]
@@ -195,6 +212,42 @@ mod tests {
                 y: 99_000.0
             })
             .is_none());
+    }
+
+    #[test]
+    fn a_note_off_the_left_edge_keeps_its_full_width() {
+        let v = view(ZoomLevel::Document);
+        let on_screen = v.note_cells(WorldPoint { x: 400.0, y: 200.0 });
+        // Same note, dragged well past the left edge of the viewport.
+        let hanging = v.note_cells(WorldPoint { x: -120.0, y: 200.0 });
+
+        assert!(hanging.x < 0, "expected a negative origin, got {hanging:?}");
+        assert_eq!(
+            hanging.width, on_screen.width,
+            "footprint must not shrink at the edge - that is what re-wraps the text"
+        );
+
+        // Only the clip is smaller, and it starts at the viewport edge.
+        let visible = hanging.clip(v.area).unwrap();
+        assert_eq!(visible.x, 0);
+        assert!(visible.width < hanging.width);
+    }
+
+    #[test]
+    fn a_note_fully_outside_the_viewport_clips_to_nothing() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let cells = CellRect {
+            x: -50,
+            y: 0,
+            width: 40,
+            height: 15,
+        };
+        assert!(cells.clip(area).is_none());
     }
 
     #[test]
