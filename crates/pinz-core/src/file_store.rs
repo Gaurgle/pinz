@@ -3,7 +3,7 @@
 //! Layout is one directory per board, one markdown file per pin:
 //!
 //! ```text
-//! ~/pinz/
+//! ~/pinz-board/
 //!   ideas/
 //!     2026-08-01-143022-buy-a-new-lamp.md
 //!   sketches/
@@ -77,12 +77,15 @@ impl FileStore {
         })
     }
 
-    /// The default root: `$PINZ_HOME`, else `~/pinz`.
+    /// The default root: `$PINZ_HOME`, else `~/pinz-board`.
+    ///
+    /// Named to match the git repo it usually is, so the directory on disk and
+    /// the repo on the remote are not two names for one thing.
     pub fn default_root() -> Option<PathBuf> {
         if let Some(dir) = std::env::var_os("PINZ_HOME") {
             return Some(PathBuf::from(dir));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("pinz"))
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("pinz-board"))
     }
 
     pub fn root(&self) -> &Path {

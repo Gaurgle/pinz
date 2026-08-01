@@ -14,7 +14,7 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 ## Boards and pins
 
 - Rename and delete boards from inside the app. Creating one is done (`w`, or
-  the `+` in the tab strip); the other two still mean touching `~/pinz` by hand.
+  the `+` in the tab strip); the other two still mean touching `~/pinz-board` by hand.
 - Move a pin to another board without leaving the board view (the store already
   moves the file when a pin's board changes).
 - Re-center the board on terminal resize.

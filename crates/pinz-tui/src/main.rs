@@ -5,7 +5,7 @@
 //! [`app::App`]. All the domain and projection math lives in `pinz-core`; this
 //! crate is just the terminal skin over it.
 //!
-//! Pins live in their own git repo (`~/pinz` by default, `$PINZ_HOME` to move
+//! Pins live in their own git repo (`~/pinz-board` by default, `$PINZ_HOME` to move
 //! it). The board is written to disk as you change it rather than only on exit,
 //! because a corkboard is meant to stay open; git sync happens at the edges
 //! (pull on start, commit and push on quit) so a drag doesn't mint a commit.
@@ -174,7 +174,7 @@ OPTIONS:
         --no-sync       do not touch git this run
 
 PINS:
-    Pins live in $PINZ_HOME, or ~/pinz. One directory per board, one markdown
+    Pins live in $PINZ_HOME, or ~/pinz-board. One directory per board, one markdown
     file per pin. It is an ordinary git repo: add a remote and `pinz sync`
     keeps your machines level."
     );

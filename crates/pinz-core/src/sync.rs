@@ -1,8 +1,8 @@
 //! Git sync for the pin repo: pull on start, commit and push on change.
 //!
 //! This is pinz's own sync, not a hook into anything else. It only ever runs
-//! against the pin root (`~/pinz` by default), which contains nothing but pins -
-//! that isolation is the whole reason the pins live in their own repo instead of
+//! against the pin root (`~/pinz-board` by default), which contains nothing but
+//! pins - that isolation is the whole reason they live in their own repo instead of
 //! riding along in a notes repo, where an auto-push would sweep up unrelated
 //! work in progress and an auto-pull would be blocked by it.
 //!

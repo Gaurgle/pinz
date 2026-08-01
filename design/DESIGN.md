@@ -86,7 +86,7 @@ What the renderer settled on (`crates/pinz-tui`):
   (`wrap_rows` in `ui.rs`) so text never runs off the edge. Not `tui-textarea` -
   it still targets ratatui 0.29 and would pull a second, incompatible ratatui
   into the tree; the editor we need is small enough to own. **Done.**
-- Storage runs through `FileStore`, the file-backed `Store`: `~/pinz` (or
+- Storage runs through `FileStore`, the file-backed `Store`: `~/pinz-board` (or
   `$PINZ_HOME`), one directory per board, one markdown file per pin with its
   position in a small frontmatter header. The renderer did not change to gain it,
   which is what the seam was for. **Done.**

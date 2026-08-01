@@ -42,12 +42,12 @@ git clone git@github.com:<you>/pinz.git ~/repos/pinz
 cd ~/repos/pinz
 cargo install --path crates/pinz-tui                 # puts `pinz` on your PATH
 
-pinz sync                                            # creates ~/pinz + first commit
-cd ~/pinz
+pinz sync                                            # creates ~/pinz-board + first commit
+cd ~/pinz-board
 gh repo create pinz-board --private --source=. --push
 ```
 
-Order matters: `~/pinz` does not exist until `pinz sync` makes it, so running
+Order matters: `~/pinz-board` does not exist until `pinz sync` makes it, so running
 `gh repo create --source=.` first leaves you in the wrong directory, and if that
 one already has an `origin` you get `Unable to add remote "origin"`.
 
@@ -56,7 +56,7 @@ one already has an `origin` you get `Unable to add remote "origin"`.
 ```sh
 git clone git@github.com:<you>/pinz.git ~/repos/pinz
 cargo install --path ~/repos/pinz/crates/pinz-tui
-git clone git@github.com:<you>/pinz-board.git ~/pinz
+git clone git@github.com:<you>/pinz-board.git ~/pinz-board
 pinz status                                          # should say: in sync
 ```
 
@@ -115,11 +115,11 @@ the TUI mirrors its interactions in cells.
 
 ## Where pins live
 
-Pins are pinz's own, not notez2 notes. They sit in **`~/pinz`** (override with
+Pins are pinz's own, not notez2 notes. They sit in **`~/pinz-board`** (override with
 `$PINZ_HOME`): one directory per board, one markdown file per pin.
 
 ```
-~/pinz/
+~/pinz-board/
   ideas/
     2026-08-01-143022-buy-a-new-lamp.md
   sketches/
@@ -147,7 +147,7 @@ dragging a note doesn't churn the history.
 
 Setup lives under [Install](#install); this is what sync does once it is running.
 
-`~/pinz` is an ordinary git repo. pinz pulls when it opens and commits and pushes when you quit, and
+`~/pinz-board` is an ordinary git repo. pinz pulls when it opens and commits and pushes when you quit, and
 `pinz sync` does both on demand. It only ever touches its own repo, so it can
 never sweep up or be blocked by work in progress anywhere else. If the same pin
 changed on both machines, pinz **stops**, leaves the repo exactly as it was and
