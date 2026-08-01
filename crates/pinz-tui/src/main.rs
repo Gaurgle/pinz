@@ -21,7 +21,7 @@ use std::panic;
 use std::path::PathBuf;
 
 use app::App;
-use pinz_core::{Board, FileStore, MemoryStore, Store, Sync, SyncOutcome};
+use pinz_core::{Board, FileStore, Store, Sync, SyncOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
@@ -35,11 +35,17 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// The board a brand new pin repo starts with, so there is always a tab.
 const FIRST_BOARD: &str = "ideas";
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn main() -> io::Result<()> {
     let opts = Options::parse(std::env::args().skip(1));
     match opts.command {
         Command::Help => {
             print_help();
+            Ok(())
+        }
+        Command::Version => {
+            println!("pinz {VERSION}");
             Ok(())
         }
         Command::Sync => git_command(Command::Sync),
@@ -65,6 +71,9 @@ enum Command {
     /// Only commit and send this machine's pins.
     Push,
     Help,
+    /// Print the version. Worth having with two machines: the pin format is
+    /// shared, so knowing both ends run the same build matters.
+    Version,
 }
 
 impl Command {
@@ -86,6 +95,7 @@ impl Command {
             "pull" => Command::Pull,
             "push" => Command::Push,
             "help" | "--help" | "-h" => Command::Help,
+            "version" | "--version" | "-V" => Command::Version,
             _ => return None,
         })
     }
@@ -98,9 +108,6 @@ struct Options {
     theme: Option<String>,
     /// Whether to touch git at all this run.
     sync: bool,
-    /// Run against seeded in-memory boards, touching no files. Handy for
-    /// screenshots and for trying the app without a pin repo.
-    demo: bool,
 }
 
 impl Options {
@@ -109,13 +116,11 @@ impl Options {
             command: Command::Run,
             theme: None,
             sync: true,
-            demo: false,
         };
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--no-sync" => opts.sync = false,
-                "--demo" => opts.demo = true,
                 "--theme" | "-t" => opts.theme = args.next(),
                 // A subcommand, if it names one; otherwise a bare word is the
                 // theme: `pinz nord`.
@@ -134,7 +139,7 @@ impl Options {
 
 fn print_help() {
     println!(
-        "pinz - a spatial bulletin board in your terminal
+        "pinz {VERSION} - a spatial bulletin board in your terminal
 
 USAGE:
     pinz [THEME]        open the board (optionally in a named theme)
@@ -143,11 +148,11 @@ USAGE:
     pinz pull           only bring the other machine's pins in
     pinz push           only commit and send this machine's pins
     pinz help           show this
+    pinz version        print the version
 
 OPTIONS:
     -t, --theme <NAME>  start in a theme (mocha, tokyo, gruvbox, nord, light)
         --no-sync       do not touch git this run
-        --demo          seeded in-memory boards; writes nothing to disk
 
 PINS:
     Pins live in $PINZ_HOME, or ~/pinz. One directory per board, one markdown
@@ -248,19 +253,12 @@ impl AsOutcome for &SyncOutcome {
 // ---- the app ----
 
 fn run_app(opts: Options) -> io::Result<()> {
-    let mut store: Box<dyn Store> = if opts.demo {
-        Box::new(MemoryStore::seeded())
-    } else {
-        let root = pin_root()?;
-        Box::new(FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?)
-    };
+    let root = pin_root()?;
+    let mut store = FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?;
 
     // Pull before loading, so the board you see is the merged one. A pull that
     // stops leaves local files untouched and only costs us the push on exit.
-    let sync = (!opts.demo && opts.sync)
-        .then(pin_root)
-        .transpose()?
-        .map(Sync::new);
+    let sync = opts.sync.then(|| Sync::new(&root));
     let mut may_push = true;
     if let Some(sync) = &sync {
         let pulled = sync.pull();
@@ -281,7 +279,7 @@ fn run_app(opts: Options) -> io::Result<()> {
     }
 
     let mut terminal = setup()?;
-    let result = run(&mut terminal, &mut app, store.as_mut());
+    let result = run(&mut terminal, &mut app, &mut store);
     restore()?;
 
     let save_error = result?;
@@ -426,8 +424,8 @@ mod tests {
         assert!(!o.sync);
         assert_eq!(o.theme.as_deref(), Some("gruvbox"));
 
-        let o = parse(&["--demo", "light"]);
-        assert!(o.demo);
+        let o = parse(&["light", "--no-sync"]);
+        assert!(!o.sync);
         assert_eq!(o.theme.as_deref(), Some("light"));
     }
 
@@ -438,11 +436,19 @@ mod tests {
     }
 
     #[test]
+    fn version_is_reportable_every_way_it_is_usually_asked_for() {
+        for word in ["version", "--version", "-V"] {
+            assert_eq!(parse(&[word]).command, Command::Version, "{word:?}");
+        }
+        assert!(!VERSION.is_empty());
+    }
+
+    #[test]
     fn no_arguments_just_runs() {
         let o = parse(&[]);
         assert_eq!(o.command, Command::Run);
         assert_eq!(o.theme, None);
-        assert!(!o.demo);
+        assert!(o.sync, "sync is on unless turned off");
     }
 
     #[test]

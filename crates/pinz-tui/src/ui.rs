@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(28)]).split(area);
+    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(10)]).split(area);
 
     let brand = Line::from(vec![
         Span::styled(
@@ -64,7 +64,9 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         cols[0],
     );
 
-    // Zoom indicator: five dots filled up to the current level, then the label.
+    // Zoom indicator: one dot per level, filled up to the current one. No label -
+    // the dots say how far in you are, and what the levels are called is the
+    // renderer's business, not something to spend header width on.
     let idx = app.zoom().index();
     let mut spans = Vec::new();
     for i in 0..ZoomLevel::ALL.len() {
@@ -76,10 +78,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         spans.push(Span::styled(glyph, Style::new().fg(color)));
         spans.push(Span::raw(" "));
     }
-    spans.push(Span::styled(
-        format!("{:<8}", app.zoom().label()),
-        Style::new().fg(theme.overlay1),
-    ));
     frame.render_widget(
         Paragraph::new(Line::from(spans))
             .alignment(Alignment::Right)
@@ -588,9 +586,9 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("pinz"), "brand missing:\n{text}");
         assert!(text.contains("ideas"), "world tab missing:\n{text}");
-        assert!(text.contains("wavez"), "world tab missing:\n{text}");
+        assert!(text.contains("sketches"), "world tab missing:\n{text}");
         // A seeded note title should be on the board at titles zoom.
-        assert!(text.contains("Fortnox"), "note title missing:\n{text}");
+        assert!(text.contains("welcome"), "note title missing:\n{text}");
     }
 
     #[test]

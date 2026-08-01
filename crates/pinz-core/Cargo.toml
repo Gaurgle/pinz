@@ -7,3 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[features]
+# Demo boards for tests and screenshots. Off by default, so the fixture is not
+# compiled into a release binary.
+fixtures = []

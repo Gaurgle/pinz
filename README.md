@@ -71,10 +71,12 @@ crates/pinz-tui`.
 ```sh
 pinz                            # opens your board
 pinz nord                       # ...in a chosen theme
-pinz --demo                     # seeded demo boards; writes nothing to disk
+
+# a throwaway board, to try things without touching your real pins:
+PINZ_HOME=/tmp/pinz-scratch pinz
 
 # from a checkout, without installing:
-cargo run --bin pinz -- --demo
+cargo run --bin pinz
 cargo test                      # runs the core + renderer unit tests
 ```
 
@@ -118,8 +120,8 @@ Pins are pinz's own, not notez2 notes. They sit in **`~/pinz`** (override with
 ```
 ~/pinz/
   ideas/
-    2026-08-01-143022-fortnox-integrations.md
-  wavez/
+    2026-08-01-143022-buy-a-new-lamp.md
+  sketches/
 ```
 
 ```markdown
@@ -129,9 +131,9 @@ y: 380
 z: 4
 color: green
 ---
-# Fortnox integrations
+# buy a new lamp
 
-Small automations for Swedish e-commerce bookkeeping.
+The one by the desk flickers.
 ```
 
 One file per pin is a sync decision: these files live in a git repo shared

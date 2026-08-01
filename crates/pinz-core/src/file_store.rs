@@ -5,8 +5,8 @@
 //! ```text
 //! ~/pinz/
 //!   ideas/
-//!     2026-08-01-143022-fortnox-integrations.md
-//!   wavez/
+//!     2026-08-01-143022-buy-a-new-lamp.md
+//!   sketches/
 //! ```
 //!
 //! A pin carries its spatial metadata in a small frontmatter header and its
@@ -19,9 +19,9 @@
 //! z: 4
 //! color: green
 //! ---
-//! # Fortnox integrations
+//! # buy a new lamp
 //!
-//! Small automations for Swedish e-commerce bookkeeping.
+//! The one by the desk flickers.
 //! ```
 //!
 //! **One file per pin is a sync decision, not a style one.** These files live in
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn a_pin_round_trips_through_its_file() {
-        let n = note(1, "Fortnox integrations", "Small automations.\n\nSecond para.");
+        let n = note(1, "buy a new lamp", "The one by the desk flickers.\n\nSecond para.");
         let parsed = parse_pin(&render_pin(&n), 1);
         assert_eq!(parsed, n);
     }
@@ -450,7 +450,7 @@ mod tests {
                 notes: vec![note(1, "First", "one"), note(2, "Second", "two")],
             },
             Board {
-                name: "wavez".to_string(),
+                name: "sketches".to_string(),
                 notes: vec![note(3, "Third", "")],
             },
         ];
@@ -460,7 +460,7 @@ mod tests {
         let loaded = fresh.load().unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].name, "ideas");
-        assert_eq!(loaded[1].name, "wavez");
+        assert_eq!(loaded[1].name, "sketches");
         let titles: Vec<&str> = loaded[0].notes.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, ["First", "Second"]);
         assert_eq!(loaded[0].notes[0].x, 120.0);
@@ -531,7 +531,7 @@ mod tests {
                     notes: vec![note(1, "Travels", "")],
                 },
                 Board {
-                    name: "wavez".to_string(),
+                    name: "sketches".to_string(),
                     notes: vec![],
                 },
             ])
@@ -545,7 +545,7 @@ mod tests {
                     notes: vec![],
                 },
                 Board {
-                    name: "wavez".to_string(),
+                    name: "sketches".to_string(),
                     notes: vec![note(1, "Travels", "")],
                 },
             ])
@@ -554,7 +554,7 @@ mod tests {
         assert!(!before.exists(), "the old file should be gone");
         let after = store.paths[&1].clone();
         assert!(after.exists());
-        assert_eq!(after.parent().unwrap().file_name().unwrap(), "wavez");
+        assert_eq!(after.parent().unwrap().file_name().unwrap(), "sketches");
     }
 
     #[test]
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn slug_is_filename_safe_and_bounded() {
-        assert_eq!(slug("Fortnox integrations"), "fortnox-integrations");
+        assert_eq!(slug("Buy a new lamp"), "buy-a-new-lamp");
         assert_eq!(slug("  weird///chars!! "), "weird-chars");
         assert_eq!(slug("åäö"), "untitled", "non-ascii collapses away");
         assert_eq!(slug(""), "untitled");

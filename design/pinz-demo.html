@@ -203,22 +203,22 @@
   const n = (x,y,color,title,body)=>({id:nextId++, x, y, color, title, body});
   const worlds = [
     { name:"ideas", notes:[
-      n(120,110,"yellow","pinz","Terminal bulletin board. Discrete LOD zoom ladder. Canvas for far zoom, real widgets for near zoom."),
-      n(470,150,"peach","Auracast venue audits","Walk a venue, map where broadcast audio should reach. Sell the report."),
-      n(300,430,"mauve","WM leak-tracing service","Turn the audio watermark into a leak-tracing offering."),
-      n(720,380,"green","Fortnox integrations","Small automations for Swedish e-commerce bookkeeping."),
-      n(560,640,"blue","z-suffix names","tackz · pinz · corkz · boardz — pick one and commit."),
+      n(120,110,"yellow","welcome","Drag a pin to move it. Double-click to edit, and use the zoom control to step through the levels of detail."),
+      n(470,150,"peach","zoom","Scroll to step through the four levels: cluster, titles, preview, document."),
+      n(300,430,"mauve","colors","Every pin carries one of eight palette colors, named abstractly so a theme decides how they look."),
+      n(720,380,"green","worlds","Switch boards from the tabs. A board is just a directory of pins."),
+      n(560,640,"blue","fixed size","Pins are all the same size in world space. Zoom changes how big they look, never how big they are."),
     ]},
-    { name:"wavez", notes:[
-      n(140,130,"blue","Broadcast platform","Auracast source/sink/assistant roles as a full-stack product."),
-      n(500,200,"teal","BASS assistant role","Scan + hand off broadcast code to the sink."),
-      n(360,470,"pink","nRF5340 kit pairing","Kits connect + pair. No end-to-end LC3 audio yet."),
-      n(760,420,"peach","LTV / PAC parser","Reuse the record parser from Sigma work."),
+    { name:"sketches", notes:[
+      n(140,130,"blue","stacking","Drop pins on each other; whichever you grab comes to the front."),
+      n(500,200,"teal","long lines","A body wider than the pin wraps to the note, and keeps the line breaks you typed."),
+      n(360,470,"pink","the edges","Pan a pin past the edge and it gets cut, never re-flowed."),
+      n(760,420,"peach","the grid","The dot grid is aligned to world space, so it slides under the pins as you pan."),
     ]},
-    { name:"life", notes:[
-      n(150,140,"red","Job search","Android > Kotlin > backend. Ship visible portfolio pieces."),
-      n(520,180,"green","zalary 2026","Update tax tables from SKV 433. Figures are year-keyed."),
-      n(340,450,"blue","dotfiles","Add new tool to .dotcore, commit, dotup on both Macs."),
+    { name:"todo", notes:[
+      n(150,140,"red","one thing","The first line is the title. Everything after it is the body."),
+      n(520,180,"green","and another","Pins are markdown files, one per pin, in their own git repo."),
+      n(340,450,"blue","a third","Nothing here is real - this page is a look-and-feel prototype for the TUI."),
     ]},
   ];
 

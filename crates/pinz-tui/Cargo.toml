@@ -13,3 +13,8 @@ path = "src/main.rs"
 [dependencies]
 pinz-core = { path = "../pinz-core" }
 ratatui = { workspace = true }
+
+[dev-dependencies]
+# The demo boards are a test-only fixture; enabling the feature here keeps it
+# out of the shipped `pinz` binary.
+pinz-core = { path = "../pinz-core", features = ["fixtures"] }
