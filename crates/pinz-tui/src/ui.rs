@@ -465,7 +465,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
             key_hint("enter", "newline", theme.overlay1),
             key_hint("↑↓←→", "move", theme.overlay1),
-            key_hint("ctrl+⌫", "word", theme.overlay1),
+            key_hint("alt+←→", "word", theme.overlay1),
+            key_hint("ctrl+⌫", "del word", theme.overlay1),
             key_hint("esc", "save", theme.overlay1),
         ]),
         Mode::Nav => Line::from(vec![

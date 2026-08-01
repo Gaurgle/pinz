@@ -268,6 +268,13 @@ impl App {
             KeyCode::Backspace if ctrl || alt => editor.delete_word(),
             KeyCode::Char('w') if ctrl => editor.delete_word(),
             KeyCode::Char('u') if ctrl => editor.kill_line(),
+            // Word-wise movement. Terminals disagree about what Option/Alt +
+            // arrow sends: some report Alt+Left, others the readline escapes
+            // Alt-b / Alt-f. Accept both spellings, and Ctrl+arrow with them.
+            KeyCode::Left if ctrl || alt => editor.left_word(),
+            KeyCode::Right if ctrl || alt => editor.right_word(),
+            KeyCode::Char('b') if alt => editor.left_word(),
+            KeyCode::Char('f') if alt => editor.right_word(),
             KeyCode::Enter => editor.insert_newline(),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
@@ -277,6 +284,10 @@ impl App {
             KeyCode::Down => editor.down(),
             KeyCode::Home => editor.home(),
             KeyCode::End => editor.end(),
+            // A modified key that got this far is a chord we don't bind, never
+            // text. Without this guard an unbound Alt-<letter> - which is how a
+            // terminal spells Option+arrow - would type its letter into the note.
+            KeyCode::Char(_) if ctrl || alt => {}
             KeyCode::Char(c) => editor.insert_char(c),
             _ => {}
         }
@@ -760,6 +771,44 @@ mod tests {
         let id = a.selected().unwrap();
         let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(note.title, "new ");
+    }
+
+    #[test]
+    fn alt_arrows_move_by_word_instead_of_typing_letters() {
+        let alt = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        // Both spellings of Option+arrow a terminal may send, plus an unbound
+        // Alt chord - none of them may reach the buffer as text.
+        for code in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('b'),
+            KeyCode::Char('f'),
+            KeyCode::Char('z'),
+        ] {
+            let mut a = app();
+            a.on_key(key(KeyCode::Char('n'))); // edit, editor holds "new note"
+            a.on_key(alt(code));
+            a.on_key(key(KeyCode::Esc));
+            let id = a.selected().unwrap();
+            let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+            assert_eq!(note.title, "new note", "{code:?} typed into the note");
+        }
+
+        // And the bound ones actually move: alt+left lands before "note", so
+        // typing there splits the title.
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(alt(KeyCode::Left));
+        a.on_key(key(KeyCode::Char('X')));
+        a.on_key(key(KeyCode::Esc));
+        let id = a.selected().unwrap();
+        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note.title, "new Xnote");
     }
 
     #[test]

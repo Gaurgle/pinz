@@ -134,13 +134,11 @@ impl TextEditor {
         self.col = char_len(&self.lines[self.row]);
     }
 
-    /// Delete the word before the cursor: any run of spaces, then the word
-    /// itself. At column 0 this falls back to a plain backspace (merging lines).
-    pub fn delete_word(&mut self) {
-        if self.col == 0 {
-            self.backspace();
-            return;
-        }
+    /// Column where the word before the cursor starts: back over any run of
+    /// spaces, then over the word itself. Shared by [`Self::left_word`] and
+    /// [`Self::delete_word`] so moving and deleting always agree on where a word
+    /// begins.
+    fn prev_word_col(&self) -> usize {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         let mut i = self.col;
         while i > 0 && chars[i - 1] == ' ' {
@@ -149,6 +147,45 @@ impl TextEditor {
         while i > 0 && chars[i - 1] != ' ' {
             i -= 1;
         }
+        i
+    }
+
+    /// Jump to the start of the word before the cursor. At column 0 this steps
+    /// to the end of the previous line, like a plain left.
+    pub fn left_word(&mut self) {
+        if self.col == 0 {
+            self.left();
+            return;
+        }
+        self.col = self.prev_word_col();
+    }
+
+    /// Jump past the word after the cursor. At the end of a line this steps to
+    /// the start of the next one, like a plain right.
+    pub fn right_word(&mut self) {
+        let chars: Vec<char> = self.lines[self.row].chars().collect();
+        if self.col >= chars.len() {
+            self.right();
+            return;
+        }
+        let mut i = self.col;
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        while i < chars.len() && chars[i] != ' ' {
+            i += 1;
+        }
+        self.col = i;
+    }
+
+    /// Delete the word before the cursor: any run of spaces, then the word
+    /// itself. At column 0 this falls back to a plain backspace (merging lines).
+    pub fn delete_word(&mut self) {
+        if self.col == 0 {
+            self.backspace();
+            return;
+        }
+        let i = self.prev_word_col();
         let start = byte_at(&self.lines[self.row], i);
         let end = byte_at(&self.lines[self.row], self.col);
         self.lines[self.row].replace_range(start..end, "");
@@ -261,6 +298,25 @@ mod tests {
         e.home(); // column 0 of "cd"
         e.delete_word();
         assert_eq!(e.text(), "abcd");
+    }
+
+    #[test]
+    fn word_movement_steps_over_words_and_across_lines() {
+        let mut e = TextEditor::new("foo bar baz");
+        e.left_word();
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 8 }, "start of \"baz\"");
+        e.left_word();
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 4 }, "start of \"bar\"");
+        e.right_word();
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 7 }, "end of \"bar\"");
+
+        // At an edge, word movement degrades to a plain step across the break.
+        let mut e = TextEditor::new("ab\ncd");
+        e.home();
+        e.left_word();
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 2 });
+        e.right_word();
+        assert_eq!(e.cursor(), Cursor { row: 1, col: 0 });
     }
 
     #[test]
