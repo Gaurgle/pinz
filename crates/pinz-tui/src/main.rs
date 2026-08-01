@@ -42,7 +42,10 @@ fn main() -> io::Result<()> {
             print_help();
             Ok(())
         }
-        Command::Sync => sync_command(),
+        Command::Sync => git_command(Command::Sync),
+        Command::Status => git_command(Command::Status),
+        Command::Pull => git_command(Command::Pull),
+        Command::Push => git_command(Command::Push),
         Command::Run => run_app(opts),
     }
 }
@@ -52,8 +55,31 @@ fn main() -> io::Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run,
+    /// Do whatever the repo needs: pull what's waiting, commit what changed,
+    /// push what's ahead.
     Sync,
+    /// Report the repo's state and do nothing.
+    Status,
+    /// Only bring the other machine's pins in.
+    Pull,
+    /// Only commit and send this machine's pins.
+    Push,
     Help,
+}
+
+impl Command {
+    /// Subcommand names, with the short aliases worth typing. `sync` is the one
+    /// to reach for; the others exist for when you want exactly one half of it.
+    fn from_word(word: &str) -> Option<Command> {
+        Some(match word {
+            "sync" | "s" => Command::Sync,
+            "status" | "st" => Command::Status,
+            "pull" | "down" => Command::Pull,
+            "push" | "up" => Command::Push,
+            "help" | "--help" | "-h" => Command::Help,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -79,16 +105,18 @@ impl Options {
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "sync" => opts.command = Command::Sync,
-                "help" | "--help" | "-h" => opts.command = Command::Help,
                 "--no-sync" => opts.sync = false,
                 "--demo" => opts.demo = true,
                 "--theme" | "-t" => opts.theme = args.next(),
-                // A bare word is the theme name: `pinz nord`.
-                s if !s.starts_with('-') && opts.theme.is_none() => {
-                    opts.theme = Some(s.to_string())
-                }
-                _ => {}
+                // A subcommand, if it names one; otherwise a bare word is the
+                // theme: `pinz nord`.
+                s => match Command::from_word(s) {
+                    Some(command) => opts.command = command,
+                    None if !s.starts_with('-') && opts.theme.is_none() => {
+                        opts.theme = Some(s.to_string())
+                    }
+                    None => {}
+                },
             }
         }
         opts
@@ -101,7 +129,10 @@ fn print_help() {
 
 USAGE:
     pinz [THEME]        open the board (optionally in a named theme)
-    pinz sync           pull, commit and push the pin repo, then exit
+    pinz sync    (s)    do whatever the repo needs: pull, commit, push
+    pinz status  (st)   report what is waiting, and change nothing
+    pinz pull    (down) only bring the other machine's pins in
+    pinz push    (up)   only commit and send this machine's pins
     pinz help           show this
 
 OPTIONS:
@@ -123,23 +154,58 @@ fn pin_root() -> io::Result<PathBuf> {
 
 // ---- the sync subcommand ----
 
-/// `pinz sync`: set the repo up if needed, then pull and push. Its own command
-/// on purpose - syncing pins is pinz's job, not something bolted onto another
-/// tool's sync.
-fn sync_command() -> io::Result<()> {
+/// The git-facing subcommands. Syncing pins is pinz's own job, not something
+/// bolted onto another tool's sync, so they all live here.
+///
+/// Each one looks at the repo's state first and only does the steps that state
+/// calls for, which is what makes `sync` safe to run reflexively: with nothing
+/// waiting it says so and touches nothing.
+fn git_command(command: Command) -> io::Result<()> {
     let root = pin_root()?;
-    // Make sure the directory exists before git is asked about it.
-    FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?;
-    let sync = Sync::new(&root);
+    // Opening the store creates the directory, and gives a brand new repo its
+    // first board - otherwise there would be nothing to commit and no way to
+    // push, which is exactly the state a fresh machine starts in.
+    let mut store = FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?;
+    let boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
+    if boards.is_empty() {
+        store
+            .save(&[Board::new(FIRST_BOARD)])
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
 
-    report("init", sync.init());
-    let pulled = sync.pull();
-    report("pull", &pulled);
-    if pulled.is_stopped() {
-        eprintln!("\nstopping before push: resolve the conflict above first.");
+    let sync = Sync::new(&root);
+    if !sync.is_repo() {
+        report("init", sync.init());
+    }
+
+    // A status is only current once we have asked the remote.
+    let fetched = sync.fetch();
+    let status = sync.status();
+    println!("   {} - {}", root.display(), status.summary());
+    if !status.has_remote {
+        println!("   no remote yet: create one, then `git -C {} remote add origin <url>`", root.display());
+    } else if let SyncOutcome::Idle(why) = &fetched {
+        println!("   (remote not reachable: {why})");
+    }
+
+    if command == Command::Status {
         return Ok(());
     }
-    report("push", sync.push("pinz: update pins"));
+
+    let wants_pull = matches!(command, Command::Sync | Command::Pull);
+    let wants_push = matches!(command, Command::Sync | Command::Push);
+
+    if wants_pull {
+        let pulled = sync.pull();
+        report("pull", &pulled);
+        if pulled.is_stopped() {
+            eprintln!("\nstopping here: resolve the conflict above before pushing.");
+            return Ok(());
+        }
+    }
+    if wants_push {
+        report("push", sync.push("pinz: update pins"));
+    }
     Ok(())
 }
 
@@ -302,6 +368,34 @@ mod tests {
         let o = parse(&["sync"]);
         assert_eq!(o.command, Command::Sync);
         assert_eq!(o.theme, None, "\"sync\" must not be read as a theme name");
+    }
+
+    #[test]
+    fn every_git_subcommand_and_alias_resolves() {
+        for (word, expected) in [
+            ("sync", Command::Sync),
+            ("s", Command::Sync),
+            ("status", Command::Status),
+            ("st", Command::Status),
+            ("pull", Command::Pull),
+            ("down", Command::Pull),
+            ("push", Command::Push),
+            ("up", Command::Push),
+        ] {
+            let o = parse(&[word]);
+            assert_eq!(o.command, expected, "{word:?} should be {expected:?}");
+            assert_eq!(o.theme, None, "{word:?} must not be read as a theme");
+        }
+    }
+
+    #[test]
+    fn a_word_that_is_not_a_subcommand_is_still_a_theme() {
+        // The aliases must not swallow theme names.
+        for theme in ["nord", "gruvbox", "light", "mocha", "tokyo"] {
+            let o = parse(&[theme]);
+            assert_eq!(o.command, Command::Run, "{theme:?} should just open the board");
+            assert_eq!(o.theme.as_deref(), Some(theme));
+        }
     }
 
     #[test]

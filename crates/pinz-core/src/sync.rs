@@ -45,6 +45,52 @@ impl SyncOutcome {
     }
 }
 
+/// What git currently thinks of the pin repo. Cheap to take, so a command can
+/// decide what actually needs doing instead of firing every step blindly.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncStatus {
+    pub is_repo: bool,
+    pub has_remote: bool,
+    pub has_upstream: bool,
+    /// Files changed since the last commit.
+    pub dirty: usize,
+    /// Commits waiting on the remote, and waiting to be sent.
+    pub behind: u32,
+    pub ahead: u32,
+}
+
+impl SyncStatus {
+    /// Is there anything at all to do?
+    pub fn is_settled(&self) -> bool {
+        self.dirty == 0 && self.behind == 0 && self.ahead == 0
+    }
+
+    /// One line for a human: what state the repo is in.
+    pub fn summary(&self) -> String {
+        if !self.is_repo {
+            return "not a git repo yet".into();
+        }
+        let mut parts = Vec::new();
+        if self.dirty > 0 {
+            parts.push(format!("{} uncommitted change(s)", self.dirty));
+        }
+        if self.behind > 0 {
+            parts.push(format!("{} to pull", self.behind));
+        }
+        if self.ahead > 0 {
+            parts.push(format!("{} to push", self.ahead));
+        }
+        if parts.is_empty() {
+            return if self.has_remote {
+                "in sync".into()
+            } else {
+                "up to date locally (no remote)".into()
+            };
+        }
+        parts.join(", ")
+    }
+}
+
 /// Git operations scoped to one directory.
 pub struct Sync {
     root: PathBuf,
@@ -110,6 +156,44 @@ impl Sync {
         Some((behind, ahead))
     }
 
+    /// Ask the remote what it has, without changing anything locally. Failure
+    /// here means offline or no remote, which is never fatal.
+    pub fn fetch(&self) -> SyncOutcome {
+        if !self.is_repo() {
+            return SyncOutcome::Idle("not a git repo yet".into());
+        }
+        if !self.has_remote() {
+            return SyncOutcome::Idle("no remote configured".into());
+        }
+        match self.git(&["fetch", "--quiet"]) {
+            Some(r) if r.ok => SyncOutcome::Done("fetched".into()),
+            Some(r) => SyncOutcome::Idle(format!("could not fetch: {}", first_line(&r.stderr))),
+            None => SyncOutcome::Idle("git is not on PATH".into()),
+        }
+    }
+
+    /// A snapshot of the repo's state. Reads only what git already knows - call
+    /// [`Sync::fetch`] first if the remote counts need to be current.
+    pub fn status(&self) -> SyncStatus {
+        if !self.is_repo() {
+            return SyncStatus::default();
+        }
+        let dirty = self
+            .git(&["status", "--porcelain"])
+            .filter(|r| r.ok)
+            .map(|r| r.stdout.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        let (behind, ahead) = self.behind_ahead().unwrap_or((0, 0));
+        SyncStatus {
+            is_repo: true,
+            has_remote: self.has_remote(),
+            has_upstream: self.has_upstream(),
+            dirty,
+            behind,
+            ahead,
+        }
+    }
+
     /// Turn the pin directory into a git repo if it isn't one. Local only: the
     /// remote is yours to create and name.
     pub fn init(&self) -> SyncOutcome {
@@ -129,17 +213,10 @@ impl Sync {
     /// replays the local ones on top; if that can't be done cleanly the rebase
     /// is aborted, so the working tree is exactly as it was before the call.
     pub fn pull(&self) -> SyncOutcome {
-        if !self.is_repo() {
-            return SyncOutcome::Idle("not a git repo yet".into());
-        }
-        if !self.has_remote() {
-            return SyncOutcome::Idle("no remote configured".into());
-        }
-        match self.git(&["fetch", "--quiet"]) {
-            Some(r) if r.ok => {}
-            // Offline, or the remote is unreachable. Local files are still fine.
-            Some(r) => return SyncOutcome::Idle(format!("could not fetch: {}", first_line(&r.stderr))),
-            None => return SyncOutcome::Idle("git is not on PATH".into()),
+        // Not a repo, no remote, or offline: all reported as idle, because local
+        // files are still perfectly fine to work with.
+        if let SyncOutcome::Idle(why) = self.fetch() {
+            return SyncOutcome::Idle(why);
         }
         if !self.has_upstream() {
             return SyncOutcome::Idle("no upstream branch set".into());
@@ -377,6 +454,76 @@ mod tests {
         let out = Sync::new(b.path()).pull();
         assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
         assert!(b.path().join("ideas/second.md").exists(), "the pin should have arrived");
+    }
+
+    #[test]
+    fn status_on_a_plain_directory_reports_no_repo() {
+        let t = Temp::new("status-norepo");
+        let st = Sync::new(t.path()).status();
+        assert!(!st.is_repo);
+        assert_eq!(st.summary(), "not a git repo yet");
+        assert!(st.is_settled(), "nothing to do without a repo");
+    }
+
+    #[test]
+    fn status_counts_uncommitted_work_then_clears() {
+        let t = Temp::new("status-dirty");
+        init_repo(t.path());
+        write_pin(t.path(), "ideas", "a.md", "# a\n");
+        write_pin(t.path(), "ideas", "b.md", "# b\n");
+
+        let sync = Sync::new(t.path());
+        let st = sync.status();
+        assert!(st.is_repo);
+        assert!(!st.has_remote);
+        assert!(st.dirty > 0, "untracked pins count as work to commit");
+        assert!(!st.is_settled());
+        assert!(st.summary().contains("uncommitted"), "got {}", st.summary());
+
+        sync.push("pinz: update pins");
+        let st = sync.status();
+        assert_eq!(st.dirty, 0);
+        assert!(st.is_settled());
+        assert_eq!(st.summary(), "up to date locally (no remote)");
+    }
+
+    #[test]
+    fn status_sees_what_is_waiting_in_both_directions() {
+        let remote = Temp::new("status-remote");
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new("status-a");
+        init_repo(a.path());
+        git_in(a.path(), &["remote", "add", "origin", &remote.path().to_string_lossy()]);
+        write_pin(a.path(), "ideas", "a.md", "# a\n");
+        Sync::new(a.path()).push("pinz: first");
+
+        let b = Temp::new("status-b");
+        assert!(Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(remote.path())
+            .arg(b.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git_in(b.path(), &["config", "user.name", "pinz test"]);
+        git_in(b.path(), &["config", "user.email", "pinz@test.local"]);
+        assert_eq!(Sync::new(b.path()).status().summary(), "in sync");
+
+        // A pushes something new; B has its own uncommitted pin.
+        write_pin(a.path(), "ideas", "second.md", "# second\n");
+        Sync::new(a.path()).push("pinz: second");
+        write_pin(b.path(), "ideas", "mine.md", "# mine\n");
+
+        let sync_b = Sync::new(b.path());
+        sync_b.fetch();
+        let st = sync_b.status();
+        assert_eq!(st.behind, 1, "one commit waiting to be pulled");
+        assert_eq!(st.ahead, 0);
+        assert_eq!(st.dirty, 1, "one pin waiting to be committed");
+        let summary = st.summary();
+        assert!(summary.contains("1 uncommitted"), "got {summary}");
+        assert!(summary.contains("1 to pull"), "got {summary}");
     }
 
     #[test]

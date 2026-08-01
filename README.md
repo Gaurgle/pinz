@@ -37,7 +37,18 @@ cargo run --bin pinz -- nord    # ...starting in a chosen theme
 cargo run --bin pinz -- --demo  # seeded demo boards; writes nothing to disk
 cargo run --bin pinz -- sync    # pull, commit and push the pin repo, then exit
 cargo test                      # runs the core + renderer unit tests
+cargo install --path crates/pinz-tui   # put `pinz` on your PATH
 ```
+
+Sync subcommands, each looking at the repo's state first and doing only what
+that state calls for:
+
+| Command | Alias | Does |
+| ------- | ----- | ---- |
+| `pinz sync` | `s` | whatever is needed: pull what's waiting, commit what changed, push what's ahead |
+| `pinz status` | `st` | reports what is waiting and changes nothing |
+| `pinz pull` | `down` | only brings the other machine's pins in |
+| `pinz push` | `up` | only commits and sends this machine's pins |
 
 Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
 **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
@@ -87,11 +98,23 @@ dragging a note doesn't churn the history.
 
 ## Syncing your machines
 
-`~/pinz` is an ordinary git repo, created on first run. Give it a remote once:
+`~/pinz` is an ordinary git repo. It does not exist until pinz makes it, so
+create it *first* and give it a remote second:
 
 ```sh
+pinz sync                                            # creates ~/pinz + first commit
 cd ~/pinz
 gh repo create pinz-board --private --source=. --push
+```
+
+Running `gh repo create --source=.` before `pinz sync` will fail: with no
+`~/pinz` to change into you are still in whatever directory you started in, and
+if that one already has an `origin` you get `Unable to add remote "origin"`.
+
+On the second machine, clone it into place and you are done:
+
+```sh
+git clone git@github.com:<you>/pinz-board.git ~/pinz
 ```
 
 After that pinz pulls when it opens and commits and pushes when you quit, and
