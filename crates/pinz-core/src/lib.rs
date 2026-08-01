@@ -11,8 +11,10 @@ pub mod file_store;
 pub mod geometry;
 pub mod model;
 pub mod store;
+pub mod sync;
 
 pub use file_store::FileStore;
 pub use geometry::{Camera, Projection, ScreenPoint, WorldPoint, ZoomLevel};
 pub use model::{Board, Color, Note, NOTE_H, NOTE_W};
 pub use store::{MemoryStore, Store, StoreError};
+pub use sync::{Sync, SyncOutcome};
