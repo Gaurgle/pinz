@@ -49,8 +49,27 @@ impl Color {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Color> {
-        Some(match s {
+}
+
+/// Returned when a string doesn't name one of the eight note colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseColorError;
+
+impl std::fmt::Display for ParseColorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "not a note color")
+    }
+}
+
+impl std::error::Error for ParseColorError {}
+
+impl std::str::FromStr for Color {
+    type Err = ParseColorError;
+
+    /// The inverse of [`Color::as_str`], so a color survives a round trip
+    /// through a pin file's frontmatter.
+    fn from_str(s: &str) -> std::result::Result<Color, ParseColorError> {
+        Ok(match s {
             "yellow" => Color::Yellow,
             "green" => Color::Green,
             "blue" => Color::Blue,
@@ -59,7 +78,7 @@ impl Color {
             "mauve" => Color::Mauve,
             "teal" => Color::Teal,
             "red" => Color::Red,
-            _ => return None,
+            _ => return Err(ParseColorError),
         })
     }
 }
@@ -153,8 +172,8 @@ mod tests {
     #[test]
     fn color_round_trips_through_str() {
         for c in Color::ALL {
-            assert_eq!(Color::from_str(c.as_str()), Some(c));
+            assert_eq!(c.as_str().parse::<Color>(), Ok(c));
         }
-        assert_eq!(Color::from_str("chartreuse"), None);
+        assert_eq!("chartreuse".parse::<Color>(), Err(ParseColorError));
     }
 }

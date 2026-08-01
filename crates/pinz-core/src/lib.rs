@@ -7,10 +7,12 @@
 //! on none of them. Keeping that arrow pointing one way is what lets a terminal
 //! app and a desktop app share one brain. See `design/DESIGN.md`.
 
+pub mod file_store;
 pub mod geometry;
 pub mod model;
 pub mod store;
 
+pub use file_store::FileStore;
 pub use geometry::{Camera, Projection, ScreenPoint, WorldPoint, ZoomLevel};
 pub use model::{Board, Color, Note, NOTE_H, NOTE_W};
 pub use store::{MemoryStore, Store, StoreError};
