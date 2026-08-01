@@ -235,19 +235,28 @@ fn draw_note_widget(
         return;
     }
 
-    // Not editing: the title, then (from preview level up) the body.
+    // Not editing: the title, then (from preview level up) the body. The body is
+    // split on its own newlines first - a Line renders an embedded '\n' as
+    // nothing, so passing the raw body would silently glue the rows together the
+    // moment the editor closes.
     let mut lines = vec![Line::from(Span::styled(
         note.title.clone(),
         Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
     ))];
     if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
         lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            note.body.clone(),
-            Style::new().fg(theme.note_fg),
-        )));
+        lines.extend(body_lines(&note.body, theme.note_fg));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+/// A note body as one [`Line`] per hard line break, so the rows a writer typed
+/// survive into the read-only view. Long rows still soft-wrap: the caller's
+/// [`Wrap`] handles each line on its own.
+fn body_lines(body: &str, fg: ratatui::style::Color) -> Vec<Line<'static>> {
+    body.split('\n')
+        .map(|row| Line::from(Span::styled(row.to_string(), Style::new().fg(fg))))
+        .collect()
 }
 
 /// The editor's logical lines, wrapped to `width` and rendered for the document
@@ -563,6 +572,46 @@ mod tests {
         let text = buffer_text(&terminal.backend().buffer().clone());
         assert!(text.contains("new note"), "title should be on screen:\n{text}");
         assert!(text.contains("hello"), "typed body should be on screen:\n{text}");
+    }
+
+    #[test]
+    fn a_saved_body_keeps_its_line_breaks_on_the_board() {
+        let mut store = MemoryStore::seeded();
+        let mut boards = store.load().unwrap();
+        boards[0].notes.clear();
+        boards[0].notes.push(pinz_core::Note {
+            id: 900,
+            title: "TITLE".into(),
+            body: "AAA\n\nBBB".into(),
+            x: 100.0,
+            y: 100.0,
+            z: 1,
+            color: pinz_core::Color::Yellow,
+        });
+        let mut app = App::new(boards);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // establish viewport + centering
+
+        // Zoom to document, where the body is drawn.
+        for _ in 0..4 {
+            app.on_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('+'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("AAA"), "body missing:\n{text}");
+        assert!(text.contains("BBB"), "body missing:\n{text}");
+        assert!(
+            !text.contains("AAABBB"),
+            "line breaks were swallowed into one row:\n{text}"
+        );
+        let rows: Vec<&str> = text.lines().collect();
+        let a = rows.iter().position(|r| r.contains("AAA")).unwrap();
+        let b = rows.iter().position(|r| r.contains("BBB")).unwrap();
+        assert_eq!(b - a, 2, "the blank line between them is preserved");
     }
 
     #[test]
