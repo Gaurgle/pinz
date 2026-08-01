@@ -43,12 +43,18 @@ cargo install --path crates/pinz-tui   # put `pinz` on your PATH
 Sync subcommands, each looking at the repo's state first and doing only what
 that state calls for:
 
-| Command | Alias | Does |
-| ------- | ----- | ---- |
-| `pinz sync` | `s` | whatever is needed: pull what's waiting, commit what changed, push what's ahead |
-| `pinz status` | `st` | reports what is waiting and changes nothing |
-| `pinz pull` | `down` | only brings the other machine's pins in |
-| `pinz push` | `up` | only commits and sends this machine's pins |
+| Command | Does |
+| ------- | ---- |
+| `pinz sync` | whatever is needed: pull what's waiting, commit what changed, push what's ahead |
+| `pinz status` (`st`) | reports what is waiting and changes nothing |
+| `pinz pull` | only brings the other machine's pins in |
+| `pinz push` | only commits and sends this machine's pins |
+
+`st` is the only abbreviation, because it is the only one where guessing wrong
+is free - the worst a misread `st` can do is print a report. Anything that moves
+commits has to be typed in full. Short aliases were tried and dropped: `s` reads
+as *status* to anyone whose git is set up that way but would have committed and
+pushed, and `up` reads as *update*, meaning pull, while it pushed.
 
 Inside the app: **scroll** or `+`/`-` to zoom through the levels of detail,
 **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or

@@ -68,14 +68,23 @@ enum Command {
 }
 
 impl Command {
-    /// Subcommand names, with the short aliases worth typing. `sync` is the one
-    /// to reach for; the others exist for when you want exactly one half of it.
+    /// Subcommand names. `sync` is the one to reach for; `pull` and `push` are
+    /// for when you want exactly one half of it.
+    ///
+    /// Only `st` is abbreviated, and only because guessing wrong about it is
+    /// free: the worst a misread `st` can do is print a report. Everything that
+    /// moves commits must be typed in full. An earlier pass had `s`, `up` and
+    /// `down`, and every one of them could be read as a different command than
+    /// it ran - `s` looks like *status* to anyone whose git is configured that
+    /// way but committed and pushed, and `up` reads as *update*, meaning pull,
+    /// while it pushed. A saved keystroke is not worth a command that does the
+    /// opposite of what you meant.
     fn from_word(word: &str) -> Option<Command> {
         Some(match word {
-            "sync" | "s" => Command::Sync,
+            "sync" => Command::Sync,
             "status" | "st" => Command::Status,
-            "pull" | "down" => Command::Pull,
-            "push" | "up" => Command::Push,
+            "pull" => Command::Pull,
+            "push" => Command::Push,
             "help" | "--help" | "-h" => Command::Help,
             _ => return None,
         })
@@ -129,10 +138,10 @@ fn print_help() {
 
 USAGE:
     pinz [THEME]        open the board (optionally in a named theme)
-    pinz sync    (s)    do whatever the repo needs: pull, commit, push
+    pinz sync           do whatever the repo needs: pull, commit, push
     pinz status  (st)   report what is waiting, and change nothing
-    pinz pull    (down) only bring the other machine's pins in
-    pinz push    (up)   only commit and send this machine's pins
+    pinz pull           only bring the other machine's pins in
+    pinz push           only commit and send this machine's pins
     pinz help           show this
 
 OPTIONS:
@@ -371,21 +380,34 @@ mod tests {
     }
 
     #[test]
-    fn every_git_subcommand_and_alias_resolves() {
+    fn every_git_subcommand_resolves() {
         for (word, expected) in [
             ("sync", Command::Sync),
-            ("s", Command::Sync),
             ("status", Command::Status),
             ("st", Command::Status),
             ("pull", Command::Pull),
-            ("down", Command::Pull),
             ("push", Command::Push),
-            ("up", Command::Push),
         ] {
             let o = parse(&[word]);
             assert_eq!(o.command, expected, "{word:?} should be {expected:?}");
             assert_eq!(o.theme, None, "{word:?} must not be read as a theme");
         }
+    }
+
+    #[test]
+    fn only_the_read_only_command_may_be_abbreviated() {
+        // A short alias is allowed only where misreading it costs nothing. "s"
+        // and "up" are the dangerous ones: both could be taken for a command
+        // other than the one they would run, and both move commits.
+        for word in ["s", "up", "down", "sy", "pu"] {
+            let o = parse(&[word]);
+            assert_eq!(
+                o.command,
+                Command::Run,
+                "{word:?} must not be a shortcut for anything that moves commits"
+            );
+        }
+        assert_eq!(parse(&["st"]).command, Command::Status, "st is read-only, so it may be short");
     }
 
     #[test]
