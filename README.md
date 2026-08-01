@@ -68,6 +68,9 @@ crates/pinz-tui`.
 
 ## Run it
 
+The first run creates the pin repo and opens on a single blank pin, ready to be
+written on: press `e` and type.
+
 ```sh
 pinz                            # opens your board
 pinz nord                       # ...in a chosen theme
@@ -89,6 +92,11 @@ that state calls for:
 | `pinz status` (`st`) | reports what is waiting and changes nothing |
 | `pinz pull` | only brings the other machine's pins in |
 | `pinz push` | only commits and sends this machine's pins |
+| `pinz version` | prints the version - worth checking that both machines match |
+| `pinz help` | the above, from the tool itself |
+
+Two flags: `--no-sync` opens the board without touching git at all, and
+`--theme <name>` (or a bare theme name) picks the starting theme.
 
 `st` is the only abbreviation, because it is the only one where guessing wrong
 is free - the worst a misread `st` can do is print a report. Anything that moves
@@ -108,7 +116,7 @@ backwards), `q` to quit.
 
 There are a few built-in themes - Catppuccin Mocha (default), Tokyo Night,
 Gruvbox, Nord, and Solarized Light. Cycle them live with `t`, or start in one by
-name: `pinz -- gruvbox` (the match is loose, so `pinz -- light` works too).
+name: `pinz gruvbox` (the match is loose, so `pinz light` works too).
 
 To compare against the intended look, open `design/pinz-demo.html` in a browser -
 the TUI mirrors its interactions in cells.
@@ -147,8 +155,8 @@ dragging a note doesn't churn the history.
 
 Setup lives under [Install](#install); this is what sync does once it is running.
 
-`~/pinz-board` is an ordinary git repo. pinz pulls when it opens and commits and pushes when you quit, and
-`pinz sync` does both on demand. It only ever touches its own repo, so it can
+`~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits and
+pushes when you quit; `pinz sync` does both on demand. It only ever touches its own repo, so it can
 never sweep up or be blocked by work in progress anywhere else. If the same pin
 changed on both machines, pinz **stops**, leaves the repo exactly as it was and
 tells you - resolving that is a human's call, not a corkboard's.
