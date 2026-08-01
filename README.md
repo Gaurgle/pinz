@@ -29,15 +29,53 @@ design/
 The core depends on no renderer; renderers depend on the core. That one-way
 arrow is what lets a terminal app and a desktop app share one brain.
 
+## Install
+
+Needs a Rust toolchain and git. There are two repos and you want both: this one
+is the **program**, and a second private one holds your **pins**. Keeping your
+notes out of the source repo is the point - see [Where pins live](#where-pins-live).
+
+**First machine**, from scratch:
+
+```sh
+git clone git@github.com:<you>/pinz.git ~/repos/pinz
+cd ~/repos/pinz
+cargo install --path crates/pinz-tui                 # puts `pinz` on your PATH
+
+pinz sync                                            # creates ~/pinz + first commit
+cd ~/pinz
+gh repo create pinz-board --private --source=. --push
+```
+
+Order matters: `~/pinz` does not exist until `pinz sync` makes it, so running
+`gh repo create --source=.` first leaves you in the wrong directory, and if that
+one already has an `origin` you get `Unable to add remote "origin"`.
+
+**Every machine after that** - clone the program, install it, clone the pins:
+
+```sh
+git clone git@github.com:<you>/pinz.git ~/repos/pinz
+cargo install --path ~/repos/pinz/crates/pinz-tui
+git clone git@github.com:<you>/pinz-board.git ~/pinz
+pinz status                                          # should say: in sync
+```
+
+That is the whole setup. `pinz` deliberately does not rely on `dotsync` or any
+other machine-setup tool; it syncs itself.
+
+To upgrade later, pull this repo and re-run `cargo install --path
+crates/pinz-tui`.
+
 ## Run it
 
 ```sh
-cargo run --bin pinz            # opens your board (~/pinz, created on first run)
-cargo run --bin pinz -- nord    # ...starting in a chosen theme
-cargo run --bin pinz -- --demo  # seeded demo boards; writes nothing to disk
-cargo run --bin pinz -- sync    # pull, commit and push the pin repo, then exit
+pinz                            # opens your board
+pinz nord                       # ...in a chosen theme
+pinz --demo                     # seeded demo boards; writes nothing to disk
+
+# from a checkout, without installing:
+cargo run --bin pinz -- --demo
 cargo test                      # runs the core + renderer unit tests
-cargo install --path crates/pinz-tui   # put `pinz` on your PATH
 ```
 
 Sync subcommands, each looking at the repo's state first and doing only what
@@ -104,26 +142,9 @@ dragging a note doesn't churn the history.
 
 ## Syncing your machines
 
-`~/pinz` is an ordinary git repo. It does not exist until pinz makes it, so
-create it *first* and give it a remote second:
+Setup lives under [Install](#install); this is what sync does once it is running.
 
-```sh
-pinz sync                                            # creates ~/pinz + first commit
-cd ~/pinz
-gh repo create pinz-board --private --source=. --push
-```
-
-Running `gh repo create --source=.` before `pinz sync` will fail: with no
-`~/pinz` to change into you are still in whatever directory you started in, and
-if that one already has an `origin` you get `Unable to add remote "origin"`.
-
-On the second machine, clone it into place and you are done:
-
-```sh
-git clone git@github.com:<you>/pinz-board.git ~/pinz
-```
-
-After that pinz pulls when it opens and commits and pushes when you quit, and
+`~/pinz` is an ordinary git repo. pinz pulls when it opens and commits and pushes when you quit, and
 `pinz sync` does both on demand. It only ever touches its own repo, so it can
 never sweep up or be blocked by work in progress anywhere else. If the same pin
 changed on both machines, pinz **stops**, leaves the repo exactly as it was and
