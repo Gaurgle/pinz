@@ -18,7 +18,7 @@ mod view;
 
 use std::io::{self, Stdout};
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use app::App;
 use pinz_core::{Board, Color, FileStore, Note, Store, Sync, SyncOutcome};
@@ -200,13 +200,18 @@ fn git_command(command: Command) -> io::Result<()> {
     // push, which is exactly the state a fresh machine starts in.
     let mut store = FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?;
     let boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
-    if boards.is_empty() {
+    let seeded = boards.is_empty();
+    if seeded {
         store
             .save(&[first_board()])
             .map_err(|e| io::Error::other(e.to_string()))?;
     }
 
     let sync = Sync::new(&root);
+    // Whether this run conjured the board out of nothing, which is worth saying
+    // out loud: it is the state someone lands in when they run the first-machine
+    // setup on a machine whose pins are really somewhere else.
+    let created = seeded && !sync.is_repo();
     if !sync.is_repo() {
         report("init", sync.init());
     }
@@ -216,7 +221,7 @@ fn git_command(command: Command) -> io::Result<()> {
     let status = sync.status();
     println!("   {} - {}", root.display(), status.summary());
     if !status.has_remote {
-        println!("   no remote yet: create one, then `git -C {} remote add origin <url>`", root.display());
+        println!("{}", remote_advice(&root, created));
     } else if let SyncOutcome::Idle(why) = &fetched {
         println!("   (remote not reachable: {why})");
     }
@@ -240,6 +245,32 @@ fn git_command(command: Command) -> io::Result<()> {
         report("push", sync.push("pinz: update pins"));
     }
     Ok(())
+}
+
+/// What to print when the pin repo has no remote.
+///
+/// Both ways forward are always shown, because from here they are
+/// indistinguishable: a board pinz just created and a board whose remote was
+/// never added look identical on disk. Guessing costs far more in one direction
+/// than the other - `remote add origin` pointed at a board that already exists
+/// on another machine fuses two unrelated histories, and git refuses to merge
+/// those - so cloning is listed first and the pins are moved aside, not deleted.
+fn remote_advice(root: &Path, created: bool) -> String {
+    let root = root.display().to_string();
+    let mut lines = Vec::new();
+    if created {
+        lines.push(format!("   {root} is new and holds one blank pin."));
+    }
+    lines.push("   no remote yet, so nothing syncs. two ways forward:".into());
+    lines.push("     your pins already live in a repo, pushed from another machine?".into());
+    lines.push("     clone it. do not add a remote here - the histories are unrelated".into());
+    lines.push("     and git will refuse to merge them:".into());
+    lines.push(format!("         mv {root} {root}.bak && git clone <url> {root}"));
+    lines.push("     this is your first machine? create the remote:".into());
+    lines.push(format!(
+        "         cd {root} && gh repo create pinz-board --private --source=. --push"
+    ));
+    lines.join("\n")
 }
 
 fn report(step: &str, outcome: impl AsOutcome) {
@@ -435,6 +466,38 @@ mod tests {
             assert_eq!(o.command, Command::Run, "{theme:?} should just open the board");
             assert_eq!(o.theme.as_deref(), Some(theme));
         }
+    }
+
+    #[test]
+    fn advice_leads_with_cloning_because_adding_a_remote_cannot_merge() {
+        // The order is the whole point: `remote add origin` against a board that
+        // already exists elsewhere fuses two unrelated histories, and git
+        // refuses that merge. Whoever reads only the first suggestion must read
+        // the one that is safe either way.
+        let advice = remote_advice(Path::new("/home/x/pinz-board"), false);
+        let clone = advice.find("git clone").expect("cloning must be offered");
+        let create = advice.find("gh repo create").expect("creating a remote must be offered");
+        assert!(clone < create, "cloning has to come first:\n{advice}");
+    }
+
+    #[test]
+    fn advice_names_the_board_it_is_talking_about() {
+        let advice = remote_advice(Path::new("/tmp/scratch-board"), false);
+        assert!(advice.contains("/tmp/scratch-board"), "advice must be copy-pasteable:\n{advice}");
+    }
+
+    #[test]
+    fn a_board_pinz_just_made_says_so() {
+        // Someone who expected their pins to be here needs to know the directory
+        // is new, not that their notes vanished.
+        let fresh = remote_advice(Path::new("/home/x/pinz-board"), true);
+        assert!(fresh.contains("new"), "a created board must announce itself:\n{fresh}");
+
+        let existing = remote_advice(Path::new("/home/x/pinz-board"), false);
+        assert!(
+            !existing.contains("new"),
+            "a board pinz did not create must not claim to be new:\n{existing}"
+        );
     }
 
     #[test]
