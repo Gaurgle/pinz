@@ -35,13 +35,29 @@ Needs a Rust toolchain and git. There are two repos and you want both: this one
 is the **program**, and a second private one holds your **pins**. Keeping your
 notes out of the source repo is the point - see [Where pins live](#where-pins-live).
 
-**First machine**, from scratch:
+### 1. Install the program
+
+The same on every machine:
 
 ```sh
 git clone git@github.com:<you>/pinz.git ~/repos/pinz
-cd ~/repos/pinz
-cargo install --path crates/pinz-tui                 # puts `pinz` on your PATH
+cargo install --path ~/repos/pinz/crates/pinz-tui    # puts `pinz` on your PATH
+```
 
+`--path` has to name the crate, not the repo root: the root is a workspace
+manifest with no package in it, and cargo will say so.
+
+### 2. Get your pins
+
+Now answer one question, because the two answers do **not** run the same
+commands:
+
+> **Does a pin repo already exist - did any other machine ever run `pinz`?**
+
+**No. This is the first machine, and the pins do not exist yet.** Let pinz
+create the board, then give it a home:
+
+```sh
 pinz sync                                            # creates ~/pinz-board + first commit
 cd ~/pinz-board
 gh repo create pinz-board --private --source=. --push
@@ -51,14 +67,30 @@ Order matters: `~/pinz-board` does not exist until `pinz sync` makes it, so runn
 `gh repo create --source=.` first leaves you in the wrong directory, and if that
 one already has an `origin` you get `Unable to add remote "origin"`.
 
-**Every machine after that** - clone the program, install it, clone the pins:
+**Yes. The pins are already on GitHub.** Clone them, and do not run `pinz sync`
+first:
 
 ```sh
-git clone git@github.com:<you>/pinz.git ~/repos/pinz
-cargo install --path ~/repos/pinz/crates/pinz-tui
 git clone git@github.com:<you>/pinz-board.git ~/pinz-board
 pinz status                                          # should say: in sync
 ```
+
+⚠️ **Do not mix the two.** Running the first-machine block on a machine whose
+pins already exist is the one way to get properly stuck: `pinz sync` sees no
+board, builds a fresh one with a single blank pin, and commits it. That repo now
+has a history unrelated to your real one, so `git remote add origin` cannot
+rescue it - git refuses to merge unrelated histories, and the board opens empty
+while your pins sit untouched on GitHub. The way out is to throw the new board
+away and clone properly:
+
+```sh
+mv ~/pinz-board ~/pinz-board.bak                     # nothing of yours is in here
+git clone git@github.com:<you>/pinz-board.git ~/pinz-board
+pinz status
+```
+
+`pinz status` names this state whenever the board has no remote, and prints both
+routes rather than guessing which one you are in.
 
 That is the whole setup. `pinz` deliberately does not rely on `dotsync` or any
 other machine-setup tool; it syncs itself.
