@@ -15,6 +15,9 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
   are the two mouse shortcuts that got left out of it.
 - Select across several notes on the board and copy them together. Needs a
   modifier to tell it apart from pan and move.
+- **Body-only yank.** `y` copies the whole note; add `Y` for the body without
+  the first line, which is the title. Wanted for pasting a note's content
+  somewhere that already has its own heading.
 
 ## Boards and pins
 

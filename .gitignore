@@ -2,3 +2,7 @@
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store
+
+# Editor and IDE state, machine-local by nature.
+.idea/
+.vscode/
