@@ -145,7 +145,32 @@ note (first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves),
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
-`t` to cycle the theme (`T` backwards), `q` to quit.
+`u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards), `q`
+to quit.
+
+### Moving a pin to another world
+
+**Drag a pin onto another world's tab** and let go. The tab lights up as you
+cross it, a 📌 rides the cursor, and the footer names both the pin and where it
+is headed, so a mis-aimed drop is caught before you release.
+
+The pin keeps its position and lands on top of whatever is already on the target
+board. You stay on the board you were clearing, which is what you want when
+taking several pins off it in a row. Dropping on the board's own tab, on the `+`,
+or anywhere else does nothing.
+
+### Undo
+
+`u` undoes, `ctrl`+`r` redoes, and pinz remembers the last 50 changes. Undo
+covers anything that changes a board: new pins, deletes, recolors, edits, moves,
+new worlds, and pins sent to another world. Undoing a change made on another
+world takes you back to that world so you can see it happen.
+
+The step size is what you would expect rather than what is easy: a whole drag is
+one step, and a whole editing session in a note is one step, not one per
+keystroke. Opening a note and closing it without typing records nothing at all.
+
+Theme, zoom and pan are not board changes and are not undone.
 
 ### Marking text and copying
 
@@ -173,7 +198,8 @@ Inside tmux it needs `set -s set-clipboard on` in your tmux config.
 
 `cmd`+`c` and `cmd`+`←`/`→` are bound too, but most terminals claim those chords
 for themselves and never forward them - they work only where you can configure
-the terminal to pass them through. `ctrl`+`c` and `home`/`end` always work.
+the terminal to pass them through. Ghostty is confirmed to swallow `cmd`+`c`.
+`ctrl`+`c` and `home`/`end` always work.
 
 There are a few built-in themes - Catppuccin Mocha (default), Tokyo Night,
 Gruvbox, Nord, and Solarized Light. Cycle them live with `t`, or start in one by
