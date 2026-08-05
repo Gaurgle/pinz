@@ -11,10 +11,12 @@
 //! (pull on start, commit and push on quit) so a drag doesn't mint a commit.
 
 mod app;
+mod clipboard;
 mod editor;
 mod theme;
 mod ui;
 mod view;
+mod wrap;
 
 use std::io::{self, Stdout};
 use std::panic;
@@ -24,7 +26,10 @@ use app::App;
 use pinz_core::{Board, Color, FileStore, Note, Store, Sync, SyncOutcome};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -351,13 +356,22 @@ fn run_app(opts: Options) -> io::Result<()> {
     Ok(())
 }
 
-/// Enter raw mode + the alternate screen + mouse capture, and install a panic
-/// hook that puts the terminal back before the panic message prints - otherwise
-/// a crash leaves the user's shell wrecked.
+/// Enter raw mode + the alternate screen + mouse capture + bracketed paste, and
+/// install a panic hook that puts the terminal back before the panic message
+/// prints - otherwise a crash leaves the user's shell wrecked.
+///
+/// Bracketed paste is what makes a paste arrive as one [`Event::Paste`] rather
+/// than a burst of keystrokes. Without it a pasted newline would read as Enter
+/// and split the note.
 fn setup() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
 
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -369,7 +383,12 @@ fn setup() -> io::Result<Tui> {
 }
 
 fn restore() -> io::Result<()> {
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
     disable_raw_mode()
 }
 
@@ -386,13 +405,8 @@ fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<O
         if app.should_quit() {
             return Ok(None);
         }
-        match event::read()? {
-            // Only act on key presses; ignore key-release/repeat where the
-            // terminal reports them, so a keystroke fires once.
-            Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
-            Event::Mouse(mouse) => app.on_mouse(mouse),
-            _ => {}
-        }
+        apply(app, event::read()?);
+        deliver_copy(&mut io::stdout(), app);
         // Persist as you work, but never mid-gesture: a drag would otherwise
         // rewrite the pin's file on every mouse-move.
         if app.revision() != saved && !app.is_dragging() {
@@ -404,9 +418,131 @@ fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<O
     }
 }
 
+/// Route one terminal event into the app. Split out of [`run`] so the wiring
+/// can be tested without a terminal to read events from.
+fn apply(app: &mut App, event: Event) {
+    match event {
+        // Only act on key presses; ignore key-release/repeat where the
+        // terminal reports them, so a keystroke fires once.
+        Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+        Event::Mouse(mouse) => app.on_mouse(mouse),
+        // Bracketed paste arrives as one lump, so a pasted newline is never
+        // mistaken for Enter and a pasted note keeps its shape.
+        Event::Paste(text) => app.on_paste(text),
+        _ => {}
+    }
+}
+
+/// Hand any text the app queued to the terminal's clipboard.
+///
+/// The app never touches the terminal itself; this is the one place a copy
+/// becomes I/O. A terminal that does not implement OSC 52 fails here, and that
+/// is reported in the footer rather than ending the session - losing a copy is
+/// annoying, losing the board is not acceptable.
+fn deliver_copy(out: &mut impl io::Write, app: &mut App) {
+    let Some(text) = app.take_pending_copy() else {
+        return;
+    };
+    if let Err(e) = clipboard::copy(out, &text) {
+        app.set_status(format!("copy failed: {e}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventState, KeyModifiers};
+
+    /// A sink that refuses everything, to check a clipboard failure is reported
+    /// rather than swallowed or fatal.
+    struct Broken;
+    impl io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("no terminal"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    /// An app with a fresh note open in the editor.
+    fn editing_app() -> App {
+        let mut store = pinz_core::MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        app.set_viewport(ratatui::layout::Rect { x: 0, y: 2, width: 100, height: 30 });
+        apply(&mut app, press(KeyCode::Char('n'), KeyModifiers::NONE));
+        app
+    }
+
+    /// An app that has just copied its whole note.
+    fn copied_app() -> App {
+        let mut app = editing_app();
+        apply(&mut app, press(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        apply(&mut app, press(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        app
+    }
+
+    #[test]
+    fn a_paste_event_reaches_the_editor() {
+        let mut app = editing_app();
+        apply(&mut app, Event::Paste("pasted".to_string()));
+        assert!(app.editor().unwrap().text().ends_with("pasted"));
+    }
+
+    #[test]
+    fn a_key_release_is_ignored() {
+        let mut app = editing_app();
+        let before = app.editor().unwrap().text();
+        apply(
+            &mut app,
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('z'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Release,
+                state: KeyEventState::NONE,
+            }),
+        );
+        assert_eq!(app.editor().unwrap().text(), before, "a release must not type");
+    }
+
+    #[test]
+    fn a_pending_copy_is_written_to_the_terminal_exactly_once() {
+        let mut app = copied_app();
+        let mut out: Vec<u8> = Vec::new();
+        deliver_copy(&mut out, &mut app);
+        assert!(!out.is_empty(), "the escape should have been written");
+        out.clear();
+        deliver_copy(&mut out, &mut app);
+        assert!(out.is_empty(), "a copy is delivered exactly once");
+    }
+
+    #[test]
+    fn nothing_is_written_when_nothing_was_copied() {
+        let mut app = editing_app();
+        let mut out: Vec<u8> = Vec::new();
+        deliver_copy(&mut out, &mut app);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_failed_copy_is_reported_rather_than_swallowed() {
+        let mut app = copied_app();
+        deliver_copy(&mut Broken, &mut app);
+        assert!(
+            app.status().is_some_and(|s| s.contains("copy failed")),
+            "{:?}",
+            app.status()
+        );
+    }
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(args.iter().map(|s| s.to_string()))

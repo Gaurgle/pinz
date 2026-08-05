@@ -1,0 +1,110 @@
+# CLAUDE.md - pinz
+
+## What this is
+
+A spatial bulletin board in the terminal: fixed-size post-it notes on a big
+pannable, zoomable board, grouped into switchable "worlds". Pins live in their
+own git repo (`~/pinz-board`, `$PINZ_HOME` to move it) and sync between machines
+with `pinz sync`.
+
+pinz is built to run as a standalone Ratatui TUI **and** as a tab inside epoz, a
+Rust + Svelte desktop app. That is why the logic lives in a UI-agnostic core with
+renderers on top, and it is the constraint that most shapes the code.
+
+<!-- house-rules:start v1 -->
+## House rules
+
+These mirror the global config at `~/claude-config`, which is machine-local and
+therefore invisible to cloud and mobile sessions. They apply here regardless of
+where the session runs.
+
+- **Never use em-dashes or en-dashes** in any output: chat, files, or code. Use
+  a hyphen, a colon, parentheses, or rewrite the sentence.
+- **Conventional Commits** (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`,
+  `cleanup:`), first line under 72 characters. Body is for the why, not the what.
+- **No `Co-Authored-By` lines.** Ever.
+- **Present the full `git commit -m "..."` command for review; do not commit.**
+  The human commits and pushes.
+- **Never edit, delete or disable a test to make code pass.** Fix the code. If a
+  test looks wrong, stop and say so rather than changing it.
+- **Ask before** adding or removing dependencies, changing schema or API
+  contracts, touching CI config, or deleting files.
+<!-- house-rules:end -->
+
+## Current state
+
+Usable. A pannable, zoomable board with a four-level zoom ladder, switchable
+worlds, mouse move and select, in-place editing through one word-wrapped editor,
+text selection with copy and paste, and git sync at the edges.
+
+There is no CI yet, and no `epoz` renderer yet - `pinz-core` has exactly one
+consumer today, but its API is designed as though it had two.
+
+## Where things are written down
+
+| Path | What it holds |
+|---|---|
+| `design/DESIGN.md` | Why the model, the zoom ladder, and the storage seam are the way they are |
+| `design/specs/` | One dated file per feature, written and approved before the feature was built |
+| `design/pinz-demo.html` | Interactive look-and-feel prototype; open in a browser to compare against the intended look |
+| `TODO.md` | The running backlog of what is next |
+| `README.md` | Install, run, keys, sync commands |
+
+`design/DESIGN.md` holds standing decisions; a file in `design/specs/` describes
+one feature and is dated. Where they disagree, the newer spec wins and DESIGN.md
+should be updated to match. Read the relevant spec before changing a feature it
+covers.
+
+## Working conventions
+
+- **Feature branch and a PR into `main`.** Not direct to main, even solo.
+- Test-first. Every new function gets a failing test before it gets an
+  implementation.
+- Formatting is **hand-maintained, not `rustfmt`**. `cargo fmt` reformats every
+  file in the repo, including ones you did not touch. Do not run it. Match the
+  surrounding style instead.
+
+## Build
+
+```
+cargo test --workspace          # the whole suite
+cargo test -p pinz-tui editor:: # one module
+cargo clippy --workspace --all-targets
+cargo run --bin pinz            # the app, against your real ~/pinz-board
+PINZ_HOME=/tmp/scratch cargo run --bin pinz   # against a throwaway board
+```
+
+The TUI cannot be driven from a non-interactive shell: it fails with `Device not
+configured` without a TTY. Assertions about rendering go through Ratatui's
+`TestBackend`, which needs no terminal.
+
+## Domain invariants - do not violate
+
+- **`pinz-core` depends on no renderer.** Renderers depend on the core, never
+  the reverse. That one-way arrow is the whole reason a terminal app and a
+  desktop app can share one brain.
+- **`pinz-core` does no I/O except through `Store`.** The trait is deliberately
+  coarse - whole-workspace `load`/`save` - and widens only when a real backend
+  needs it, so it does not grow speculative methods no caller uses.
+- **One file per pin, one directory per board.** Pins live in a git repo synced
+  between machines; a single board file would conflict whenever both ends
+  touched anything on that board. Per-pin files mean a drag does not churn the
+  whole board's history.
+- **A note's world size is fixed** (`NOTE_W`, `NOTE_H`). Zoom changes how big a
+  note looks, never how big it is. Layout, hit-testing and stacking all assume
+  uniform notes.
+- **Every spatial operation goes through `View`** - pan, zoom, drag, hit-test.
+  It is the single projection between world and screen, so what you click is
+  what the math says is under the cursor.
+- **Rendering and hit-testing must run the same layout.** The tab strip is laid
+  out in `app.rs` and drawn from that same list; the editor's wrap lives in
+  `wrap.rs` and is used by both the renderer and the mouse. Computing either one
+  twice is how they drift.
+- **`App` performs no I/O and no drawing.** It is a state machine: `ui.rs` reads
+  it to render, `main.rs` does the terminal work. A copy is queued in
+  `pending_copy` for the runner to deliver, not written from `App`. This is what
+  keeps input logic testable with no terminal attached.
+- **Clipboard copy sends plain OSC 52, never tmux's DCS passthrough.**
+  Passthrough needs `allow-passthrough on`, off by default, so wrapping it makes
+  tmux discard the copy silently. tmux also needs `set-clipboard on`; the README
+  says so.

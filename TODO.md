@@ -10,6 +10,11 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
   editing a note? We added word-wrap in edit mode, so this is likely the board
   canvas or an opt-out of wrap.)
 - Vertical scroll when a note's body grows taller than the post-it.
+- Double-click to select a word, triple-click to select a line. Selection and
+  copy are done (`design/specs/2026-08-05-text-selection-and-copy.md`); these
+  are the two mouse shortcuts that got left out of it.
+- Select across several notes on the board and copy them together. Needs a
+  modifier to tell it apart from pan and move.
 
 ## Boards and pins
 
