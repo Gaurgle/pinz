@@ -13,7 +13,23 @@ pub struct Cursor {
     pub col: usize,
 }
 
-/// An editable buffer of text lines with a single cursor.
+/// A cursor movement. Bundling these into one enum lets [`TextEditor::step`] be
+/// the single door movement goes through, so a motion cannot move the caret and
+/// forget to update the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    LeftWord,
+    RightWord,
+}
+
+/// An editable buffer of text lines with a single cursor and an optional
+/// selection.
 #[derive(Debug, Clone)]
 pub struct TextEditor {
     /// Never empty: an empty buffer is one empty line.
@@ -21,6 +37,9 @@ pub struct TextEditor {
     row: usize,
     /// Character index within the current line (0..=char_len).
     col: usize,
+    /// The fixed end of a selection. The cursor is the moving end, so the pair
+    /// is in no particular order - [`Self::selection`] sorts them.
+    anchor: Option<Cursor>,
 }
 
 impl TextEditor {
@@ -33,7 +52,7 @@ impl TextEditor {
         }
         let row = lines.len() - 1;
         let col = char_len(&lines[row]);
-        Self { lines, row, col }
+        Self { lines, row, col, anchor: None }
     }
 
     /// The buffer as a single string, lines joined by `\n`.
@@ -49,15 +68,134 @@ impl TextEditor {
         Cursor { row: self.row, col: self.col }
     }
 
+    // ---- selection ----
+
+    /// The selection as `(start, end)` in document order, or `None` when
+    /// nothing is selected. An anchor sitting on the cursor is not a selection.
+    pub fn selection(&self) -> Option<(Cursor, Cursor)> {
+        let anchor = self.anchor?;
+        let cursor = self.cursor();
+        if anchor == cursor {
+            return None;
+        }
+        Some(if (anchor.row, anchor.col) < (cursor.row, cursor.col) {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        })
+    }
+
+    /// The selected text, lines joined by `\n`.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection()?;
+        if start.row == end.row {
+            return Some(slice(&self.lines[start.row], start.col, end.col));
+        }
+        let mut out = slice(&self.lines[start.row], start.col, usize::MAX);
+        for line in &self.lines[start.row + 1..end.row] {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out.push('\n');
+        out.push_str(&slice(&self.lines[end.row], 0, end.col));
+        Some(out)
+    }
+
+    /// Select the whole buffer.
+    pub fn select_all(&mut self) {
+        self.anchor = Some(Cursor { row: 0, col: 0 });
+        self.row = self.lines.len() - 1;
+        self.col = char_len(&self.lines[self.row]);
+    }
+
+    /// Remove the selected range, leaving the cursor where it started. Returns
+    /// whether anything was removed, so callers can fall through to their
+    /// single-character behaviour when there was no selection.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection() else {
+            return false;
+        };
+        if start.row == end.row {
+            let from = byte_at(&self.lines[start.row], start.col);
+            let to = byte_at(&self.lines[start.row], end.col);
+            self.lines[start.row].replace_range(from..to, "");
+        } else {
+            // Keep what is left of the last line, staple it to what is left of
+            // the first, and drop everything in between.
+            let cut = byte_at(&self.lines[end.row], end.col);
+            let tail = self.lines[end.row].split_off(cut);
+            let keep = byte_at(&self.lines[start.row], start.col);
+            self.lines[start.row].truncate(keep);
+            self.lines[start.row].push_str(&tail);
+            self.lines.drain(start.row + 1..=end.row);
+        }
+        self.row = start.row;
+        self.col = start.col;
+        self.anchor = None;
+        true
+    }
+
+    /// Move the cursor. `extend` grows the selection from the existing anchor
+    /// (dropping one there if the selection is new); without it the selection
+    /// collapses, as an unmodified arrow key should.
+    pub fn step(&mut self, m: Motion, extend: bool) {
+        self.reanchor(extend);
+        match m {
+            Motion::Left => self.left(),
+            Motion::Right => self.right(),
+            Motion::Up => self.up(),
+            Motion::Down => self.down(),
+            Motion::Home => self.home(),
+            Motion::End => self.end(),
+            Motion::LeftWord => self.left_word(),
+            Motion::RightWord => self.right_word(),
+        }
+    }
+
+    /// Put the cursor at an arbitrary position, clamped into the buffer. For the
+    /// mouse, which can point anywhere.
+    pub fn set_cursor(&mut self, at: Cursor, extend: bool) {
+        self.reanchor(extend);
+        self.row = at.row.min(self.lines.len() - 1);
+        self.col = at.col.min(char_len(&self.lines[self.row]));
+    }
+
+    /// Leave the anchor where it is when extending, drop one at the cursor when
+    /// starting a fresh selection, and clear it when not extending at all.
+    fn reanchor(&mut self, extend: bool) {
+        let here = self.cursor();
+        if extend {
+            self.anchor.get_or_insert(here);
+        } else {
+            self.anchor = None;
+        }
+    }
+
     // ---- editing ----
 
+    /// Insert text that may span lines, replacing any selection. Carriage
+    /// returns are dropped so a CRLF paste does not litter the note with them.
+    pub fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
+        for (i, part) in s.replace('\r', "").split('\n').enumerate() {
+            if i > 0 {
+                self.insert_newline();
+            }
+            for c in part.chars() {
+                self.insert_char(c);
+            }
+        }
+    }
+
     pub fn insert_char(&mut self, c: char) {
+        self.delete_selection();
         let at = byte_at(&self.lines[self.row], self.col);
         self.lines[self.row].insert(at, c);
         self.col += 1;
     }
 
     pub fn insert_newline(&mut self) {
+        self.delete_selection();
         let at = byte_at(&self.lines[self.row], self.col);
         let tail = self.lines[self.row].split_off(at);
         self.lines.insert(self.row + 1, tail);
@@ -65,8 +203,12 @@ impl TextEditor {
         self.col = 0;
     }
 
-    /// Delete the character before the cursor, joining lines at column 0.
+    /// Delete the character before the cursor, joining lines at column 0. With
+    /// a selection this removes exactly the selection and no extra character.
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.col > 0 {
             let start = byte_at(&self.lines[self.row], self.col - 1);
             let end = byte_at(&self.lines[self.row], self.col);
@@ -81,7 +223,11 @@ impl TextEditor {
     }
 
     /// Delete the character at the cursor, pulling up the next line at line end.
+    /// With a selection this removes exactly the selection.
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.col < char_len(&self.lines[self.row]) {
             let start = byte_at(&self.lines[self.row], self.col);
             let end = byte_at(&self.lines[self.row], self.col + 1);
@@ -94,7 +240,7 @@ impl TextEditor {
 
     // ---- movement ----
 
-    pub fn left(&mut self) {
+    fn left(&mut self) {
         if self.col > 0 {
             self.col -= 1;
         } else if self.row > 0 {
@@ -103,7 +249,7 @@ impl TextEditor {
         }
     }
 
-    pub fn right(&mut self) {
+    fn right(&mut self) {
         if self.col < char_len(&self.lines[self.row]) {
             self.col += 1;
         } else if self.row + 1 < self.lines.len() {
@@ -112,25 +258,25 @@ impl TextEditor {
         }
     }
 
-    pub fn up(&mut self) {
+    fn up(&mut self) {
         if self.row > 0 {
             self.row -= 1;
             self.col = self.col.min(char_len(&self.lines[self.row]));
         }
     }
 
-    pub fn down(&mut self) {
+    fn down(&mut self) {
         if self.row + 1 < self.lines.len() {
             self.row += 1;
             self.col = self.col.min(char_len(&self.lines[self.row]));
         }
     }
 
-    pub fn home(&mut self) {
+    fn home(&mut self) {
         self.col = 0;
     }
 
-    pub fn end(&mut self) {
+    fn end(&mut self) {
         self.col = char_len(&self.lines[self.row]);
     }
 
@@ -152,7 +298,7 @@ impl TextEditor {
 
     /// Jump to the start of the word before the cursor. At column 0 this steps
     /// to the end of the previous line, like a plain left.
-    pub fn left_word(&mut self) {
+    fn left_word(&mut self) {
         if self.col == 0 {
             self.left();
             return;
@@ -162,7 +308,7 @@ impl TextEditor {
 
     /// Jump past the word after the cursor. At the end of a line this steps to
     /// the start of the next one, like a plain right.
-    pub fn right_word(&mut self) {
+    fn right_word(&mut self) {
         let chars: Vec<char> = self.lines[self.row].chars().collect();
         if self.col >= chars.len() {
             self.right();
@@ -180,7 +326,11 @@ impl TextEditor {
 
     /// Delete the word before the cursor: any run of spaces, then the word
     /// itself. At column 0 this falls back to a plain backspace (merging lines).
+    /// A selection takes precedence and is removed instead.
     pub fn delete_word(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.col == 0 {
             self.backspace();
             return;
@@ -193,11 +343,20 @@ impl TextEditor {
     }
 
     /// Clear the current line's text, leaving an empty line with the cursor at
-    /// its start.
+    /// its start. A selection takes precedence and is removed instead.
     pub fn kill_line(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         self.lines[self.row].clear();
         self.col = 0;
     }
+}
+
+/// The characters of `s` from `from` up to `to`, both character indices. `to`
+/// past the end means "to the end of the line".
+fn slice(s: &str, from: usize, to: usize) -> String {
+    s[byte_at(s, from)..byte_at(s, to)].to_string()
 }
 
 fn char_len(s: &str) -> usize {
@@ -325,5 +484,186 @@ mod tests {
         e.kill_line();
         assert_eq!(e.text(), "");
         assert_eq!(e.cursor(), Cursor { row: 0, col: 0 });
+    }
+
+    // ---- selection ----
+
+    #[test]
+    fn a_fresh_editor_has_no_selection() {
+        let e = TextEditor::new("hello");
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.selected_text(), None);
+    }
+
+    #[test]
+    fn moving_without_extend_selects_nothing() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, false);
+        e.step(Motion::Left, false);
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 3 });
+    }
+
+    #[test]
+    fn extending_left_selects_back_from_the_anchor() {
+        let mut e = TextEditor::new("hello"); // cursor at the end
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        assert_eq!(e.selected_text().as_deref(), Some("lo"));
+    }
+
+    #[test]
+    fn selection_is_ordered_even_when_the_anchor_is_after_the_cursor() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true); // anchor 5, cursor 4
+        let (start, end) = e.selection().unwrap();
+        assert_eq!(start, Cursor { row: 0, col: 4 });
+        assert_eq!(end, Cursor { row: 0, col: 5 });
+    }
+
+    #[test]
+    fn a_selection_spans_lines() {
+        let mut e = TextEditor::new("ab\ncd"); // cursor at (1, 2)
+        e.step(Motion::Up, true); // (0, 2)
+        assert_eq!(e.selected_text().as_deref(), Some("\ncd"));
+        e.step(Motion::Home, true); // (0, 0)
+        assert_eq!(e.selected_text().as_deref(), Some("ab\ncd"));
+    }
+
+    #[test]
+    fn moving_without_extend_collapses_an_existing_selection() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        assert!(e.selection().is_some());
+        e.step(Motion::Left, false);
+        assert_eq!(e.selection(), None);
+    }
+
+    #[test]
+    fn an_anchor_on_the_cursor_is_not_a_selection() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Right, true); // back where it started
+        assert_eq!(e.selection(), None);
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_buffer() {
+        let mut e = TextEditor::new("ab\ncd");
+        e.select_all();
+        assert_eq!(e.selected_text().as_deref(), Some("ab\ncd"));
+    }
+
+    #[test]
+    fn delete_selection_removes_the_range_and_reports_it() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        assert!(e.delete_selection());
+        assert_eq!(e.text(), "hel");
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 3 });
+        assert_eq!(e.selection(), None);
+        assert!(!e.delete_selection(), "nothing selected, nothing removed");
+        assert_eq!(e.text(), "hel");
+    }
+
+    #[test]
+    fn delete_selection_joins_the_lines_it_spanned() {
+        let mut e = TextEditor::new("ab\ncd");
+        e.set_cursor(Cursor { row: 1, col: 1 }, false); // between c and d
+        e.step(Motion::Up, true); // anchor (1,1), cursor (0,1)
+        assert_eq!(e.selected_text().as_deref(), Some("b\nc"));
+        assert!(e.delete_selection());
+        assert_eq!(e.text(), "ad", "the head of line 0 keeps the tail of line 1");
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 1 });
+    }
+
+    #[test]
+    fn typing_replaces_the_selection() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        e.insert_char('p');
+        assert_eq!(e.text(), "help");
+        assert_eq!(e.selection(), None);
+    }
+
+    #[test]
+    fn backspace_over_a_selection_removes_it_and_nothing_more() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        e.backspace();
+        assert_eq!(e.text(), "hel", "the l before the selection survives");
+    }
+
+    #[test]
+    fn delete_over_a_selection_removes_it_and_nothing_more() {
+        let mut e = TextEditor::new("hello");
+        e.home();
+        e.step(Motion::Right, true);
+        e.step(Motion::Right, true);
+        e.delete();
+        assert_eq!(e.text(), "llo");
+    }
+
+    #[test]
+    fn newline_replaces_the_selection() {
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        e.insert_newline();
+        assert_eq!(e.text(), "hel\n");
+    }
+
+    #[test]
+    fn word_motions_extend_too() {
+        let mut e = TextEditor::new("foo bar baz");
+        e.step(Motion::LeftWord, true);
+        assert_eq!(e.selected_text().as_deref(), Some("baz"));
+    }
+
+    #[test]
+    fn set_cursor_clamps_a_position_past_the_buffer() {
+        let mut e = TextEditor::new("ab\ncd");
+        e.set_cursor(Cursor { row: 99, col: 99 }, false);
+        assert_eq!(e.cursor(), Cursor { row: 1, col: 2 });
+        e.set_cursor(Cursor { row: 0, col: 99 }, false);
+        assert_eq!(e.cursor(), Cursor { row: 0, col: 2 });
+    }
+
+    #[test]
+    fn set_cursor_with_extend_selects_from_where_it_was() {
+        let mut e = TextEditor::new("hello");
+        e.set_cursor(Cursor { row: 0, col: 1 }, false);
+        e.set_cursor(Cursor { row: 0, col: 4 }, true);
+        assert_eq!(e.selected_text().as_deref(), Some("ell"));
+    }
+
+    #[test]
+    fn insert_str_splits_on_newlines_and_drops_carriage_returns() {
+        let mut e = TextEditor::new("");
+        e.insert_str("one\r\ntwo");
+        assert_eq!(e.text(), "one\ntwo");
+        assert_eq!(e.cursor(), Cursor { row: 1, col: 3 });
+    }
+
+    #[test]
+    fn insert_str_replaces_a_selection() {
+        let mut e = TextEditor::new("hello");
+        e.select_all();
+        e.insert_str("bye");
+        assert_eq!(e.text(), "bye");
+    }
+
+    #[test]
+    fn selection_counts_characters_not_bytes() {
+        let mut e = TextEditor::new("åäö");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true);
+        assert_eq!(e.selected_text().as_deref(), Some("äö"));
+        e.delete_selection();
+        assert_eq!(e.text(), "å");
     }
 }

@@ -12,9 +12,11 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
-use crate::editor::TextEditor;
+use crate::editor::{Cursor, Motion, TextEditor};
 use crate::theme::{self, Theme};
-use crate::view::View;
+use crate::view::{CellRect, View};
+use crate::wrap::{self, Wrapped};
+use std::collections::VecDeque;
 
 /// Arrow-key pan step, in cells.
 const PAN_CELLS: f64 = 4.0;
@@ -26,6 +28,10 @@ const NEW_TAB_WIDTH: u16 = 3;
 /// Longest world name we will take. A world is a directory, so this is about
 /// keeping paths sane rather than anything deeper.
 const BOARD_NAME_MAX: usize = 40;
+/// How many board states undo remembers. A snapshot is the whole workspace,
+/// which for a corkboard of text notes is tens of kilobytes - less than the
+/// frame pinz already redraws on every keystroke - so this can be generous.
+const UNDO_DEPTH: usize = 50;
 
 /// What the keyboard is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +81,50 @@ pub struct Prompt {
     pub error: Option<String>,
 }
 
+/// The cursor movement a key means while editing, if it means one at all.
+///
+/// Terminals disagree about what Option/Alt + arrow sends: some report
+/// Alt+Left, others the readline escapes Alt-b / Alt-f. Both spellings are
+/// accepted, and Ctrl+arrow with them.
+///
+/// SUPER is Cmd on macOS, where Cmd + arrow is line-wise movement. Most
+/// terminals claim that chord before it reaches an application - it is bound
+/// here so it works in the ones that can be told to forward it, not because it
+/// can be relied on.
+fn motion_for(code: KeyCode, ctrl: bool, alt: bool, sup: bool) -> Option<Motion> {
+    Some(match code {
+        KeyCode::Left if ctrl || alt => Motion::LeftWord,
+        KeyCode::Right if ctrl || alt => Motion::RightWord,
+        KeyCode::Left if sup => Motion::Home,
+        KeyCode::Right if sup => Motion::End,
+        KeyCode::Char('b' | 'B') if alt => Motion::LeftWord,
+        KeyCode::Char('f' | 'F') if alt => Motion::RightWord,
+        KeyCode::Left => Motion::Left,
+        KeyCode::Right => Motion::Right,
+        KeyCode::Up => Motion::Up,
+        KeyCode::Down => Motion::Down,
+        KeyCode::Home => Motion::Home,
+        KeyCode::End => Motion::End,
+        _ => return None,
+    })
+}
+
+/// Board state as undo remembers it.
+///
+/// A whole-workspace copy rather than an inverse operation per action. The
+/// store already saves whole workspaces, so this needs no new machinery and has
+/// no per-action way to be wrong; the cost is a clone of some text.
+///
+/// `active` and `selected` ride along so undoing something that happened on
+/// another world puts you back where it happened, rather than leaving you
+/// staring at a board that did not change.
+#[derive(Debug, Clone)]
+struct Snapshot {
+    boards: Vec<Board>,
+    active: usize,
+    selected: Option<u64>,
+}
+
 /// A drag in progress, started on mouse-down.
 #[derive(Debug, Clone, Copy)]
 enum Drag {
@@ -87,6 +137,9 @@ enum Drag {
         row: u16,
         origin: WorldPoint,
     },
+    /// Sweeping a text selection inside the note being edited. The anchor lives
+    /// in the editor, so there is nothing to carry here.
+    Text,
 }
 
 pub struct App {
@@ -116,6 +169,20 @@ pub struct App {
     /// it to know when the board is worth writing to disk, so a crash costs at
     /// most the pin you were mid-drag on.
     revision: u64,
+    /// Text waiting to go to the system clipboard. The app never writes to the
+    /// terminal itself - the runner drains this and does the I/O - which keeps
+    /// this module a pure state machine, testable with no terminal attached.
+    pending_copy: Option<String>,
+    /// A one-off message for the footer, cleared by the next event. A copy is
+    /// otherwise completely invisible.
+    status: Option<String>,
+    /// Board states to go back to, oldest first. Capped at [`UNDO_DEPTH`].
+    undo: VecDeque<Snapshot>,
+    /// States undone past, newest last. Cleared by any fresh change.
+    redo: Vec<Snapshot>,
+    /// The state as it was before the event being handled. Held across a whole
+    /// drag so a gesture becomes one undo step rather than one per mouse-move.
+    pending: Option<Snapshot>,
     should_quit: bool,
 }
 
@@ -149,6 +216,11 @@ impl App {
             color_tick: 0,
             theme_index: 0,
             revision: 0,
+            pending_copy: None,
+            status: None,
+            undo: VecDeque::new(),
+            redo: Vec::new(),
+            pending: None,
             should_quit: false,
         }
     }
@@ -186,6 +258,23 @@ impl App {
     }
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// A one-off message for the footer, if the last event produced one.
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    /// Take the text waiting to go to the clipboard, if any. The runner calls
+    /// this after each event; a copy is delivered exactly once.
+    pub fn take_pending_copy(&mut self) -> Option<String> {
+        self.pending_copy.take()
+    }
+
+    /// Say something in the footer. For the runner, which finds out whether a
+    /// copy actually reached the terminal after the app has stopped looking.
+    pub fn set_status(&mut self, message: String) {
+        self.status = Some(message);
     }
 
     /// Counter of changes to the boards. Compare it across events to know
@@ -311,9 +400,15 @@ impl App {
     // ---- keyboard ----
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        // Ctrl-C always quits, in any mode.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+        self.begin_step();
+        self.key(key);
+        self.end_step();
+    }
+
+    fn key(&mut self, key: KeyEvent) {
+        // Whatever the last event had to say, this one supersedes it.
+        self.status = None;
+        if self.copy_chord(key) {
             return;
         }
         match self.mode {
@@ -321,7 +416,10 @@ impl App {
             Mode::Prompt => return self.prompt_key(key),
             Mode::Nav => {}
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
+            KeyCode::Char('r') if ctrl => self.redo_step(),
+            KeyCode::Char('u') => self.undo_step(),
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.selected = None,
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_at_center(true),
@@ -334,6 +432,7 @@ impl App {
             KeyCode::Char('c') => self.cycle_note_color(true),
             KeyCode::Char('C') => self.cycle_note_color(false),
             KeyCode::Char('w') => self.begin_new_world(),
+            KeyCode::Char('y') => self.yank_note(),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
@@ -342,6 +441,200 @@ impl App {
             KeyCode::Up => self.pan_cells(0.0, -PAN_CELLS),
             KeyCode::Down => self.pan_cells(0.0, PAN_CELLS),
             _ => {}
+        }
+    }
+
+    // ---- undo ----
+
+    /// Stash the state this event is about to change.
+    ///
+    /// Done unconditionally rather than at each mutation site: a `checkpoint()`
+    /// call per action is one forgotten call away from a silent hole in the
+    /// history. Most events change nothing and the stash is dropped again in
+    /// [`Self::end_step`].
+    fn begin_step(&mut self) {
+        if self.pending.is_none() {
+            self.pending = Some(self.snapshot());
+        }
+    }
+
+    /// Commit the stash as an undo step, once the gesture it belongs to is over
+    /// and only if the boards actually differ.
+    ///
+    /// Comparing the boards rather than watching `revision` is deliberate.
+    /// `revision` is bumped by `note_mut` on *access*, because it cannot know
+    /// whether the caller will change anything - which is the right trade for
+    /// deciding when to save, but would record an undo step for opening a note
+    /// and closing it untouched.
+    ///
+    /// Holding the stash across a drag is what makes a whole drag one step
+    /// instead of one per mouse-move, the same predicate the runner uses to
+    /// avoid saving mid-gesture. Typing collapses the same way, because a note
+    /// is only written back on `commit_edit`.
+    fn end_step(&mut self) {
+        if self.is_dragging() {
+            return; // still gathering; keep the pre-gesture stash
+        }
+        let Some(snap) = self.pending.take() else {
+            return;
+        };
+        if snap.boards == self.boards {
+            return;
+        }
+        if self.undo.len() == UNDO_DEPTH {
+            self.undo.pop_front();
+        }
+        self.undo.push_back(snap);
+        // A fresh change makes the undone future unreachable.
+        self.redo.clear();
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            boards: self.boards.clone(),
+            active: self.active,
+            selected: self.selected,
+        }
+    }
+
+    /// Put a snapshot back, clamping the active world in case the board list
+    /// shrank since it was taken.
+    fn restore(&mut self, snap: Snapshot) {
+        self.boards = snap.boards;
+        self.active = snap.active.min(self.boards.len().saturating_sub(1));
+        self.selected = snap.selected;
+        self.revision += 1;
+        self.clamp_origin();
+    }
+
+    fn undo_step(&mut self) {
+        let Some(snap) = self.undo.pop_back() else {
+            self.status = Some("nothing to undo".into());
+            return;
+        };
+        let current = self.snapshot();
+        self.restore(snap);
+        self.redo.push(current);
+        // Clearing the stash is what stops an undo from becoming an undo step.
+        self.pending = None;
+    }
+
+    fn redo_step(&mut self) {
+        let Some(snap) = self.redo.pop() else {
+            self.status = Some("nothing to redo".into());
+            return;
+        };
+        let current = self.snapshot();
+        self.restore(snap);
+        if self.undo.len() == UNDO_DEPTH {
+            self.undo.pop_front();
+        }
+        self.undo.push_back(current);
+        self.pending = None;
+    }
+
+    // ---- copy ----
+
+    /// Handle the copy and cut chords, which have to be resolved before the
+    /// per-mode dispatch because Ctrl-C means two different things.
+    ///
+    /// Ctrl-C copies when there is a selection to copy and quits otherwise, so
+    /// it keeps working as the escape hatch everywhere except the one moment
+    /// you obviously meant to copy. SUPER+C (Cmd-C on macOS) only ever copies -
+    /// it is never an escape hatch, and most terminals swallow it before it
+    /// reaches us anyway.
+    ///
+    /// Returns whether the key was consumed.
+    fn copy_chord(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let sup = key.modifiers.contains(KeyModifiers::SUPER);
+        if !ctrl && !sup {
+            return false;
+        }
+        let cut = match key.code {
+            KeyCode::Char('c' | 'C') => false,
+            KeyCode::Char('x' | 'X') => true,
+            _ => return false,
+        };
+        if self.mode == Mode::Edit && self.has_selection() {
+            self.copy_selection(cut);
+            return true;
+        }
+        // Nothing to copy. Ctrl-C falls back to its old job; Cmd-C has none.
+        if ctrl && !cut {
+            self.should_quit = true;
+        }
+        true
+    }
+
+    fn has_selection(&self) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|e| e.selection().is_some())
+    }
+
+    /// Copy the editor's selection, removing it too when `cut`.
+    fn copy_selection(&mut self, cut: bool) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let Some(text) = editor.selected_text() else {
+            return;
+        };
+        if cut {
+            editor.delete_selection();
+        }
+        self.set_copied(text);
+    }
+
+    /// Copy the selected note whole: the title, then the body under it.
+    fn yank_note(&mut self) {
+        let Some(id) = self.selected else { return };
+        let Some(note) = self.active_board().notes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let text = if note.body.is_empty() {
+            note.title.clone()
+        } else {
+            format!("{}\n{}", note.title, note.body)
+        };
+        self.set_copied(text);
+    }
+
+    /// Queue text for the clipboard and say so in the footer.
+    fn set_copied(&mut self, text: String) {
+        self.status = Some(format!("copied {} chars", text.chars().count()));
+        self.pending_copy = Some(text);
+    }
+
+    /// Text arriving as one lump from a bracketed paste. Never key-by-key, so a
+    /// pasted newline cannot be mistaken for Enter.
+    pub fn on_paste(&mut self, text: String) {
+        self.begin_step();
+        self.paste(text);
+        self.end_step();
+    }
+
+    fn paste(&mut self, text: String) {
+        self.status = None;
+        match self.mode {
+            Mode::Edit => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.insert_str(&text);
+                }
+            }
+            Mode::Prompt => {
+                let Some(prompt) = self.prompt.as_mut() else { return };
+                // A world name is a directory name: one line, bounded.
+                for c in text.lines().next().unwrap_or_default().chars() {
+                    if prompt.input.chars().count() >= BOARD_NAME_MAX {
+                        break;
+                    }
+                    prompt.input.push(c);
+                }
+                prompt.error = None;
+            }
+            Mode::Nav => {}
         }
     }
 
@@ -375,32 +668,31 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let sup = key.modifiers.contains(KeyModifiers::SUPER);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        // Movement first, because every motion is also a selection gesture:
+        // holding shift extends instead of collapsing. Routing them all through
+        // `step` is what keeps the two from drifting apart.
+        if let Some(motion) = motion_for(key.code, ctrl, alt, sup) {
+            editor.step(motion, shift);
+            return;
+        }
+
         match key.code {
             // Word / line delete. Ctrl or Alt + Backspace (and Ctrl-W) kill the
             // word before the cursor; Ctrl-U clears the current line.
             KeyCode::Backspace if ctrl || alt => editor.delete_word(),
             KeyCode::Char('w') if ctrl => editor.delete_word(),
             KeyCode::Char('u') if ctrl => editor.kill_line(),
-            // Word-wise movement. Terminals disagree about what Option/Alt +
-            // arrow sends: some report Alt+Left, others the readline escapes
-            // Alt-b / Alt-f. Accept both spellings, and Ctrl+arrow with them.
-            KeyCode::Left if ctrl || alt => editor.left_word(),
-            KeyCode::Right if ctrl || alt => editor.right_word(),
-            KeyCode::Char('b') if alt => editor.left_word(),
-            KeyCode::Char('f') if alt => editor.right_word(),
+            KeyCode::Char('a' | 'A') if ctrl || sup => editor.select_all(),
             KeyCode::Enter => editor.insert_newline(),
             KeyCode::Backspace => editor.backspace(),
             KeyCode::Delete => editor.delete(),
-            KeyCode::Left => editor.left(),
-            KeyCode::Right => editor.right(),
-            KeyCode::Up => editor.up(),
-            KeyCode::Down => editor.down(),
-            KeyCode::Home => editor.home(),
-            KeyCode::End => editor.end(),
             // A modified key that got this far is a chord we don't bind, never
             // text. Without this guard an unbound Alt-<letter> - which is how a
             // terminal spells Option+arrow - would type its letter into the note.
-            KeyCode::Char(_) if ctrl || alt => {}
+            KeyCode::Char(_) if ctrl || alt || sup => {}
             KeyCode::Char(c) => editor.insert_char(c),
             _ => {}
         }
@@ -504,6 +796,13 @@ impl App {
     // ---- mouse ----
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        self.begin_step();
+        self.mouse(m);
+        self.end_step();
+    }
+
+    fn mouse(&mut self, m: MouseEvent) {
+        self.status = None;
         match m.kind {
             MouseEventKind::ScrollUp => self.zoom_at(true, m.column, m.row),
             MouseEventKind::ScrollDown => self.zoom_at(false, m.column, m.row),
@@ -526,8 +825,16 @@ impl App {
         if !self.in_viewport(col, row) {
             return;
         }
-        // Editing ends the moment you touch the board; the edit is saved.
+        // Editing ends the moment you touch the board - unless you touched the
+        // note you are editing, where a press starts a text selection instead.
         if self.mode == Mode::Edit {
+            if let Some(at) = self.edit_cursor_at(col, row, false) {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.set_cursor(at, false);
+                }
+                self.drag = Some(Drag::Text);
+                return;
+            }
             self.commit_edit();
         }
         let world = self.view().world_at(col, row);
@@ -577,8 +884,54 @@ impl App {
         }
     }
 
+    /// The edited note's full cell footprint and the wrap laying out its text.
+    /// `None` unless a note is open in the editor.
+    ///
+    /// Computed here rather than handed back by the renderer, so `app` stays
+    /// testable with no terminal: `ui` runs the identical wrap when it draws.
+    fn edit_layout(&self) -> Option<(CellRect, Wrapped)> {
+        let editor = self.editor.as_ref()?;
+        let id = self.selected?;
+        let note = self.active_board().notes.iter().find(|n| n.id == id)?;
+        let cells = self.view().note_cells(note.position());
+        // The text sits inside the note's one-cell border.
+        let width = cells.width.checked_sub(2)?;
+        Some((cells, wrap::wrap(editor.lines(), width as usize)))
+    }
+
+    /// Where in the buffer a screen cell points, for a click or drag inside the
+    /// note being edited. `clamp` is what separates the two gestures: a click
+    /// outside the text area is not a click on text at all, but a drag that
+    /// wanders off the edge should keep selecting to the nearest cell.
+    fn edit_cursor_at(&self, col: u16, row: u16, clamp: bool) -> Option<Cursor> {
+        let (cells, wrapped) = self.edit_layout()?;
+        let width = cells.width.checked_sub(2)? as i64;
+        let height = cells.height.checked_sub(2)? as i64;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let dx = col as i64 - (cells.x + 1);
+        let dy = row as i64 - (cells.y + 1);
+        let (dx, dy) = if clamp {
+            (dx.clamp(0, width - 1), dy.clamp(0, height - 1))
+        } else {
+            if dx < 0 || dy < 0 || dx >= width || dy >= height {
+                return None;
+            }
+            (dx, dy)
+        };
+        Some(wrapped.locate(dy as usize, dx as usize))
+    }
+
     fn mouse_drag(&mut self, col: u16, row: u16) {
         match self.drag {
+            Some(Drag::Text) => {
+                if let Some(at) = self.edit_cursor_at(col, row, true) {
+                    if let Some(editor) = self.editor.as_mut() {
+                        editor.set_cursor(at, true);
+                    }
+                }
+            }
             Some(Drag::Note { id, off_x, off_y }) => {
                 let world = self.view().world_at(col, row);
                 if let Some(note) = self.note_mut(id) {
@@ -1294,16 +1647,461 @@ mod tests {
         assert!(a.selected().is_none());
     }
 
+    // ---- selection and copy ----
+
+    /// A note in edit mode holding `text`, with the caret at the end.
+    fn editing(text: &str) -> App {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.editor = Some(TextEditor::new(text));
+        a
+    }
+
+    #[test]
+    fn shift_arrow_builds_a_selection() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("lo"));
+    }
+
+    #[test]
+    fn a_plain_arrow_collapses_the_selection() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(key(KeyCode::Left));
+        assert_eq!(a.editor().unwrap().selection(), None);
+    }
+
+    #[test]
+    fn alt_shift_arrow_extends_by_word() {
+        let mut a = editing("foo bar baz");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("baz"));
+    }
+
+    #[test]
+    fn cmd_arrows_jump_to_the_line_edges() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SUPER));
+        assert_eq!(a.editor().unwrap().cursor(), Cursor { row: 0, col: 0 });
+        a.on_key(chord(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(a.editor().unwrap().cursor(), Cursor { row: 0, col: 5 });
+    }
+
+    #[test]
+    fn cmd_shift_arrow_selects_to_the_line_edge() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SUPER | KeyModifiers::SHIFT));
+        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_cmd_chord_never_types_its_letter() {
+        let mut a = editing("hi");
+        a.on_key(chord(KeyCode::Char('z'), KeyModifiers::SUPER));
+        assert_eq!(a.editor().unwrap().text(), "hi");
+    }
+
+    #[test]
+    fn ctrl_a_selects_the_whole_note() {
+        let mut a = editing("one\ntwo");
+        a.on_key(chord(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("one\ntwo"));
+    }
+
+    #[test]
+    fn ctrl_c_with_a_selection_copies_instead_of_quitting() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!a.should_quit(), "a copy must not quit the app");
+        assert_eq!(a.take_pending_copy().as_deref(), Some("o"));
+        assert_eq!(a.editor().unwrap().text(), "hello", "copy does not remove text");
+    }
+
+    #[test]
+    fn ctrl_c_without_a_selection_still_quits() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.should_quit());
+        assert_eq!(a.take_pending_copy(), None);
+    }
+
+    #[test]
+    fn cmd_c_copies_but_never_quits() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::SUPER));
+        assert!(!a.should_quit(), "cmd+c is not an escape hatch");
+        assert_eq!(a.take_pending_copy(), None, "nothing selected, nothing copied");
+    }
+
+    #[test]
+    fn ctrl_x_cuts_the_selection() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert_eq!(a.take_pending_copy().as_deref(), Some("lo"));
+        assert_eq!(a.editor().unwrap().text(), "hel");
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(key(KeyCode::Char('p')));
+        assert_eq!(a.editor().unwrap().text(), "help");
+    }
+
+    #[test]
+    fn y_in_nav_copies_the_selected_note() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Enter));
+        for c in "body".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Esc)); // save, still selected in Nav
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy().as_deref(), Some("new note\nbody"));
+    }
+
+    #[test]
+    fn y_in_nav_copies_the_title_alone_when_there_is_no_body() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy().as_deref(), Some("new note"));
+    }
+
+    #[test]
+    fn y_in_nav_does_nothing_with_no_note_selected() {
+        let mut a = app();
+        a.selected = None;
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy(), None);
+    }
+
+    #[test]
+    fn a_copy_reports_a_status_that_the_next_key_clears() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.status().is_some_and(|s| s.contains("copied")), "{:?}", a.status());
+        a.on_key(key(KeyCode::Left));
+        assert_eq!(a.status(), None);
+    }
+
+    #[test]
+    fn taking_the_pending_copy_leaves_nothing_behind() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(a.take_pending_copy().is_some());
+        assert_eq!(a.take_pending_copy(), None, "a copy is delivered once");
+    }
+
+    // ---- paste ----
+
+    #[test]
+    fn paste_inserts_multi_line_text_into_the_editor() {
+        let mut a = editing("hi ");
+        a.on_paste("one\ntwo".to_string());
+        assert_eq!(a.editor().unwrap().text(), "hi one\ntwo");
+    }
+
+    #[test]
+    fn paste_replaces_a_selection() {
+        let mut a = editing("hello");
+        a.on_key(chord(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        a.on_paste("bye".to_string());
+        assert_eq!(a.editor().unwrap().text(), "bye");
+    }
+
+    #[test]
+    fn paste_into_a_prompt_takes_only_the_first_line() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('w')));
+        a.on_paste("world\nignored".to_string());
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.mode(), Mode::Nav);
+        assert_eq!(a.active_board().name, "world");
+    }
+
+    #[test]
+    fn paste_in_nav_does_nothing() {
+        let mut a = app();
+        let before = a.active_board().notes.len();
+        a.on_paste("text".to_string());
+        assert_eq!(a.active_board().notes.len(), before);
+    }
+
+    // ---- mouse selection ----
+
+    /// The screen cell of a character inside the note currently being edited.
+    fn cell_in_note(a: &App, vrow: u16, vcol: u16) -> (u16, u16) {
+        let (cells, _) = a.edit_layout().expect("a note should be open");
+        ((cells.x + 1) as u16 + vcol, (cells.y + 1) as u16 + vrow)
+    }
+
+    #[test]
+    fn dragging_inside_the_edited_note_selects_text() {
+        let mut a = editing("hello world");
+        let (c0, r0) = cell_in_note(&a, 0, 0);
+        a.on_mouse(mouse_down(c0, r0));
+        assert_eq!(a.editor().unwrap().cursor(), Cursor { row: 0, col: 0 });
+        a.on_mouse(mouse_drag(c0 + 5, r0));
+        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("hello"));
+        assert_eq!(a.mode(), Mode::Edit, "a text drag must not end the edit");
+    }
+
+    #[test]
+    fn a_plain_click_inside_the_note_just_moves_the_caret() {
+        let mut a = editing("hello world");
+        let (c0, r0) = cell_in_note(&a, 0, 3);
+        a.on_mouse(mouse_down(c0, r0));
+        a.on_mouse(mouse_up(c0, r0));
+        assert_eq!(a.editor().unwrap().cursor(), Cursor { row: 0, col: 3 });
+        assert_eq!(a.editor().unwrap().selection(), None);
+        assert_eq!(a.mode(), Mode::Edit);
+    }
+
+    #[test]
+    fn dragging_past_the_note_edge_clamps_instead_of_stopping() {
+        let mut a = editing("hello world");
+        let (c0, r0) = cell_in_note(&a, 0, 0);
+        a.on_mouse(mouse_down(c0, r0));
+        a.on_mouse(mouse_drag(c0 + 500, r0));
+        let selected = a.editor().unwrap().selected_text().unwrap();
+        assert!(selected.starts_with("hello"), "clamped to the row's end: {selected:?}");
+    }
+
+    #[test]
+    fn clicking_outside_the_edited_note_still_commits_the_edit() {
+        let mut a = editing("hello");
+        a.on_mouse(mouse_down(a.viewport.x, a.viewport.y));
+        assert_eq!(a.mode(), Mode::Nav, "a click on the board saves and leaves edit");
+    }
+
+    // ---- undo / redo ----
+
+    fn titles(a: &App) -> Vec<String> {
+        a.active_board().notes.iter().map(|n| n.title.clone()).collect()
+    }
+
+    /// Title and body of every note. The editor opens with the cursor at the end
+    /// of the whole buffer, so typing lands in the body - titles alone would not
+    /// see an edit at all.
+    fn contents(a: &App) -> Vec<String> {
+        a.active_board()
+            .notes
+            .iter()
+            .map(|n| format!("{}\n{}", n.title, n.body))
+            .collect()
+    }
+
+    #[test]
+    fn u_undoes_a_new_note() {
+        let mut a = app();
+        let before = titles(&a);
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc)); // save
+        assert_ne!(titles(&a), before);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(titles(&a), before, "the note should be gone again");
+    }
+
+    #[test]
+    fn u_undoes_a_delete() {
+        let mut a = app();
+        a.selected = Some(a.active_board().notes[0].id);
+        let before = titles(&a);
+        a.on_key(key(KeyCode::Char('d')));
+        assert_ne!(titles(&a), before);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(titles(&a), before);
+    }
+
+    #[test]
+    fn u_undoes_a_recolor() {
+        let mut a = app();
+        let id = a.active_board().notes[0].id;
+        a.selected = Some(id);
+        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let before = color_of(&a);
+        a.on_key(key(KeyCode::Char('c')));
+        assert_ne!(color_of(&a), before);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(color_of(&a), before);
+    }
+
+    #[test]
+    fn a_finished_edit_is_one_undo_step() {
+        let mut a = app();
+        a.selected = Some(a.active_board().notes[0].id);
+        let before = contents(&a);
+        a.on_key(key(KeyCode::Char('e')));
+        for c in "xyz".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Esc)); // one edit, three keystrokes
+        assert_ne!(contents(&a), before);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(contents(&a), before, "one undo should take back the whole edit");
+    }
+
+    #[test]
+    fn opening_a_note_and_closing_it_untouched_records_nothing() {
+        let mut a = app();
+        a.selected = Some(a.active_board().notes[0].id);
+        a.on_key(key(KeyCode::Char('d'))); // one real step to undo back to
+        let deleted = contents(&a);
+        a.selected = Some(a.active_board().notes[0].id);
+        a.on_key(key(KeyCode::Char('e')));
+        a.on_key(key(KeyCode::Esc)); // opened and closed, changed nothing
+        a.on_key(key(KeyCode::Char('u')));
+        assert_ne!(contents(&a), deleted, "the no-op edit must not eat the undo");
+    }
+
+    #[test]
+    fn a_drag_is_one_undo_step() {
+        let mut a = app();
+        let note = &a.active_board().notes[0];
+        let (id, x0, y0) = (note.id, note.x, note.y);
+        // Aim at the note's centre: a corner rounds outside it at this zoom.
+        let (sc, sr) = cell_of_note(&a, id);
+        a.on_mouse(mouse_down(sc, sr));
+        assert_eq!(a.selected(), Some(id), "the drag should have grabbed the note");
+        for step in 1..=5 {
+            a.on_mouse(mouse_drag(sc + step, sr + step));
+        }
+        a.on_mouse(mouse_up(sc + 5, sr + 5));
+        let moved = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_ne!((moved.x, moved.y), (x0, y0), "the note should have moved");
+
+        a.on_key(key(KeyCode::Char('u')));
+        let back = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!((back.x, back.y), (x0, y0), "one undo should take back the whole drag");
+    }
+
+    #[test]
+    fn a_key_that_changes_nothing_records_no_undo_step() {
+        let mut a = app();
+        a.selected = Some(a.active_board().notes[0].id);
+        a.on_key(key(KeyCode::Char('d'))); // one real step
+        let after_delete = titles(&a);
+        for _ in 0..5 {
+            a.on_key(key(KeyCode::Left)); // pans; no board change
+        }
+        a.on_key(key(KeyCode::Char('u')));
+        assert_ne!(titles(&a), after_delete, "undo should reach past the pans");
+    }
+
+    #[test]
+    fn ctrl_r_redoes_what_u_undid() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        let created = titles(&a);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_ne!(titles(&a), created);
+        a.on_key(chord(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(titles(&a), created, "redo should put it back");
+    }
+
+    #[test]
+    fn a_new_action_clears_the_redo_stack() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        a.on_key(key(KeyCode::Char('u')));
+        a.selected = Some(a.active_board().notes[0].id);
+        a.on_key(key(KeyCode::Char('c'))); // a fresh action
+        let after = titles(&a);
+        a.on_key(chord(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(titles(&a), after, "redo must not resurrect a discarded future");
+    }
+
+    #[test]
+    fn undo_and_redo_on_empty_stacks_do_nothing() {
+        let mut a = app();
+        let before = titles(&a);
+        a.on_key(key(KeyCode::Char('u')));
+        a.on_key(chord(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(titles(&a), before);
+        assert!(a.status().is_some_and(|s| s.contains("nothing")), "{:?}", a.status());
+    }
+
+    #[test]
+    fn undo_does_not_record_itself() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        let created = titles(&a);
+        let empty = titles(&app());
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(titles(&a), empty);
+        // A second undo has nothing left; if undo recorded itself it would
+        // bounce back to the created state here.
+        a.on_key(key(KeyCode::Char('u')));
+        assert_ne!(titles(&a), created, "undo recorded itself");
+    }
+
+    #[test]
+    fn the_undo_depth_is_capped() {
+        let mut a = app();
+        let id = a.active_board().notes[0].id;
+        a.selected = Some(id);
+        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let oldest = color_of(&a);
+        for _ in 0..(UNDO_DEPTH + 10) {
+            a.on_key(key(KeyCode::Char('c')));
+        }
+        for _ in 0..(UNDO_DEPTH + 10) {
+            a.on_key(key(KeyCode::Char('u')));
+        }
+        assert_ne!(color_of(&a), oldest, "the oldest steps should have been evicted");
+    }
+
     // helpers that reach into private state for assertions
     fn v_area(a: &App) -> Rect {
         a.viewport
     }
-    fn mouse_down(col: u16, row: u16) -> MouseEvent {
+    /// The screen cell at the centre of a note, for aiming a mouse gesture.
+    fn cell_of_note(a: &App, id: u64) -> (u16, u16) {
+        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        let (cx, cy) = a.view().cell_of(note.center());
+        (
+            (a.viewport.x as f64 + cx).round() as u16,
+            (a.viewport.y as f64 + cy).round() as u16,
+        )
+    }
+    fn chord(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+    fn mouse_at(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
         MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
+            kind,
             column: col,
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+    fn mouse_down(col: u16, row: u16) -> MouseEvent {
+        mouse_at(MouseEventKind::Down(MouseButton::Left), col, row)
+    }
+    fn mouse_drag(col: u16, row: u16) -> MouseEvent {
+        mouse_at(MouseEventKind::Drag(MouseButton::Left), col, row)
+    }
+    fn mouse_up(col: u16, row: u16) -> MouseEvent {
+        mouse_at(MouseEventKind::Up(MouseButton::Left), col, row)
     }
 }

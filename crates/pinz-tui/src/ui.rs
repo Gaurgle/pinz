@@ -20,9 +20,10 @@ use ratatui::{
 };
 
 use crate::app::{App, Mode, Prompt, TabKind};
-use crate::editor::Cursor;
+use crate::editor::TextEditor;
 use crate::theme::Theme;
 use crate::view::{CellRect, View};
+use crate::wrap;
 
 /// Paint the whole app: header, tabs, board, footer.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -303,8 +304,7 @@ fn draw_note_widget(
         // rest = body), word-wrapped to the inner width with the cursor mapped
         // through the wrap so text never runs off the right edge.
         if let Some(editor) = editing.then(|| app.editor()).flatten() {
-            let lines =
-                editor_lines(editor.lines(), editor.cursor(), inner.width as usize, theme.note_fg);
+            let lines = editor_lines(editor, inner.width as usize, theme);
             Paragraph::new(lines).render(inner, buf);
             return;
         }
@@ -376,117 +376,121 @@ fn body_lines(body: &str, fg: ratatui::style::Color) -> Vec<Line<'static>> {
 }
 
 /// The editor's logical lines, wrapped to `width` and rendered for the document
-/// view: line 1 (the title) is bold, and the cursor shows as a reversed cell,
-/// placed through the wrap so it stays on screen on long lines.
-fn editor_lines(
-    logical: &[String],
-    cursor: Cursor,
-    width: usize,
-    fg: ratatui::style::Color,
-) -> Vec<Line<'static>> {
-    let wrapped = wrap_rows(logical, cursor, width);
+/// view: line 1 (the title) is bold, the selection is highlighted, and the
+/// cursor shows as a reversed cell - all placed through the wrap so they stay on
+/// screen on long lines.
+///
+/// The caret is drawn only when nothing is selected. With a selection the
+/// moving edge of the highlight *is* the caret, and drawing both would put a
+/// reversed cell inside a reversed run, which cancels out and reads as a hole.
+fn editor_lines(editor: &TextEditor, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let wrapped = wrap::wrap(editor.lines(), width);
+    let selection = editor
+        .selection()
+        .map(|(start, end)| (wrapped.place(start), wrapped.place(end)));
+    let caret = selection
+        .is_none()
+        .then(|| wrapped.place(editor.cursor()));
+
     wrapped
         .rows
         .iter()
         .enumerate()
-        .map(|(vr, (text, li))| {
-            let caret = (vr == wrapped.caret_row).then_some(wrapped.caret_col);
-            row_line(text, *li == 0, fg, caret)
+        .map(|(vr, row)| {
+            // Does the selection run past this row's end? Only mark the break
+            // when the next row starts a new logical line - a wrap continuation
+            // has no newline to show.
+            let breaks = wrapped
+                .rows
+                .get(vr + 1)
+                .is_some_and(|next| next.line != row.line);
+            row_line(
+                &row.text,
+                row.line == 0,
+                theme,
+                selected_range(selection, vr, row.text.chars().count(), breaks),
+                caret.filter(|(cr, _)| *cr == vr).map(|(_, cc)| cc),
+            )
         })
         .collect()
 }
 
-/// One rendered row: bold when it belongs to the title line, with an optional
-/// reversed-cell caret at `caret_col` (a block caret past the last character).
+/// The half-open range of cells on visual row `vr` that the selection covers.
+/// The range may extend one past `len` to mark a selected line break.
+fn selected_range(
+    selection: Option<((usize, usize), (usize, usize))>,
+    vr: usize,
+    len: usize,
+    breaks: bool,
+) -> Option<(usize, usize)> {
+    let ((sr, sc), (er, ec)) = selection?;
+    if vr < sr || vr > er {
+        return None;
+    }
+    let from = if vr == sr { sc } else { 0 };
+    let to = if vr == er {
+        ec
+    } else if breaks {
+        len + 1
+    } else {
+        len
+    };
+    (from < to).then_some((from, to))
+}
+
+/// One rendered row: bold when it belongs to the title line, with the selected
+/// run highlighted and an optional reversed-cell caret at `caret_col` (a block
+/// caret past the last character).
+///
+/// Built cell by cell and then coalesced into spans. Slicing the row at the
+/// selection and caret boundaries directly would mean four overlapping cases;
+/// styling each cell and merging equal neighbours has one.
 fn row_line(
     text: &str,
     title: bool,
-    fg: ratatui::style::Color,
+    theme: &Theme,
+    selected: Option<(usize, usize)>,
     caret_col: Option<usize>,
 ) -> Line<'static> {
-    let mut base = Style::new().fg(fg);
+    let mut base = Style::new().fg(theme.note_fg);
     if title {
         base = base.add_modifier(Modifier::BOLD);
     }
-    let Some(col) = caret_col else {
-        return Line::from(Span::styled(text.to_string(), base));
-    };
-    let chars: Vec<char> = text.chars().collect();
-    let col = col.min(chars.len());
+    let highlight = base.bg(theme.accent).fg(theme.mantle);
     let caret = base.add_modifier(Modifier::REVERSED);
-    let before: String = chars[..col].iter().collect();
-    let mut spans = vec![Span::styled(before, base)];
-    if col < chars.len() {
-        spans.push(Span::styled(chars[col].to_string(), caret));
-        spans.push(Span::styled(chars[col + 1..].iter().collect::<String>(), base));
-    } else {
-        spans.push(Span::styled(" ".to_string(), caret));
+
+    let mut cells: Vec<(char, Style)> = text
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = match selected {
+                Some((from, to)) if (from..to).contains(&i) => highlight,
+                _ => base,
+            };
+            (c, style)
+        })
+        .collect();
+
+    // A selected line break, and a caret past the last character, both show as
+    // one extra cell on the end of the row.
+    if selected.is_some_and(|(_, to)| to > cells.len()) {
+        cells.push((' ', highlight));
+    }
+    if let Some(col) = caret_col {
+        match cells.get_mut(col) {
+            Some(cell) => cell.1 = caret,
+            None => cells.push((' ', caret)),
+        }
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (c, style) in cells {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), style)),
+        }
     }
     Line::from(spans)
-}
-
-/// Editor lines wrapped to a width, plus where the cursor lands in that layout.
-struct EditWrap {
-    /// (visual row text, source logical line index).
-    rows: Vec<(String, usize)>,
-    caret_row: usize,
-    caret_col: usize,
-}
-
-/// Greedy word wrap: break after spaces, hard-break words longer than the width,
-/// and track the cursor's visual position. Spaces are kept at the end of a
-/// wrapped row so every character maps to exactly one visual cell - which is what
-/// lets the caret land precisely after wrapping.
-fn wrap_rows(logical: &[String], cursor: Cursor, width: usize) -> EditWrap {
-    let width = width.max(1);
-    let mut rows: Vec<(String, usize)> = Vec::new();
-    let mut caret_row = 0;
-    let mut caret_col = 0;
-    let mut caret_done = false;
-
-    for (li, line) in logical.iter().enumerate() {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
-            if li == cursor.row && !caret_done {
-                caret_row = rows.len();
-                caret_col = 0;
-                caret_done = true;
-            }
-            rows.push((String::new(), li));
-            continue;
-        }
-        let mut start = 0;
-        while start < chars.len() {
-            let hard_end = (start + width).min(chars.len());
-            let end = if hard_end == chars.len() {
-                chars.len()
-            } else {
-                match chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-                    Some(rel) if rel > 0 => start + rel + 1,
-                    _ => hard_end,
-                }
-            };
-            if li == cursor.row && !caret_done {
-                let last = end == chars.len();
-                if cursor.col < end || (last && cursor.col <= end) {
-                    caret_row = rows.len();
-                    caret_col = cursor.col - start;
-                    caret_done = true;
-                }
-            }
-            rows.push((chars[start..end].iter().collect(), li));
-            start = end;
-        }
-    }
-
-    if rows.is_empty() {
-        rows.push((String::new(), 0));
-    }
-    if !caret_done {
-        caret_row = rows.len() - 1;
-        caret_col = rows.last().map(|(t, _)| t.chars().count()).unwrap_or(0);
-    }
-    EditWrap { rows, caret_row, caret_col }
 }
 
 /// Thin position indicators along the right and bottom edges, sized and placed
@@ -570,6 +574,21 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // A one-off message takes the whole footer: it is news, and the hints will
+    // still be there on the next keystroke. Without this a copy - which changes
+    // nothing on screen - would give no sign it happened at all.
+    if let Some(status) = app.status() {
+        let line = Line::from(Span::styled(
+            format!(" {status} "),
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(
+            Paragraph::new(line).style(Style::new().bg(theme.mantle)),
+            area,
+        );
+        return;
+    }
+
     let hint = match app.mode() {
         Mode::Prompt => Line::from(vec![
             Span::styled(
@@ -591,6 +610,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key_hint("enter", "newline", theme.overlay1),
             key_hint("↑↓←→", "move", theme.overlay1),
             key_hint("alt+←→", "word", theme.overlay1),
+            key_hint("shift+←→", "select", theme.overlay1),
+            key_hint("ctrl+c", "copy", theme.overlay1),
             key_hint("ctrl+⌫", "del word", theme.overlay1),
             key_hint("esc", "save", theme.overlay1),
         ]),
@@ -599,6 +620,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             key_hint("drag", "move/pan", theme.overlay1),
             key_hint("n", "new", theme.overlay1),
             key_hint("e", "edit", theme.overlay1),
+            key_hint("y", "copy", theme.overlay1),
             key_hint("c", "color", theme.overlay1),
             key_hint("d", "del", theme.overlay1),
             key_hint("tab", "world", theme.overlay1),
@@ -620,6 +642,8 @@ fn key_hint(key: &str, label: &str, color: ratatui::style::Color) -> Span<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::{Cursor, Motion};
+    use crate::theme;
     use pinz_core::{MemoryStore, Store};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -855,31 +879,151 @@ mod tests {
         assert!(!text.contains("esc to cancel"), "the reason replaces the hint");
     }
 
-    #[test]
-    fn wrap_keeps_all_characters_and_bounds_the_width() {
-        let lines = vec!["hello world foo".to_string()];
-        let w = wrap_rows(&lines, Cursor { row: 0, col: 15 }, 8);
-        let joined: String = w.rows.iter().map(|(t, _)| t.as_str()).collect();
-        assert_eq!(joined, "hello world foo", "no characters lost to wrapping");
-        assert!(w.rows.iter().all(|(t, _)| t.chars().count() <= 8));
-        assert_eq!((w.caret_row, w.caret_col), (2, 3), "cursor at end tracks to last row");
+    /// Every cell of a rendered line as (char, style), so a test can ask what
+    /// each character was painted with rather than guess at span boundaries.
+    fn cells(line: &Line<'static>) -> Vec<(char, Style)> {
+        line.spans
+            .iter()
+            .flat_map(|s| s.content.chars().map(|c| (c, s.style)))
+            .collect()
+    }
+
+    fn highlighted(line: &Line<'static>, theme: &Theme) -> String {
+        cells(line)
+            .iter()
+            .filter(|(_, s)| s.bg == Some(theme.accent))
+            .map(|(c, _)| *c)
+            .collect()
+    }
+
+    fn has_caret(line: &Line<'static>) -> bool {
+        cells(line)
+            .iter()
+            .any(|(_, s)| s.add_modifier.contains(Modifier::REVERSED))
     }
 
     #[test]
-    fn wrap_maps_a_cursor_inside_the_first_row() {
-        let lines = vec!["hello world foo".to_string()];
-        let w = wrap_rows(&lines, Cursor { row: 0, col: 3 }, 8);
-        assert_eq!((w.caret_row, w.caret_col), (0, 3));
+    fn the_selected_run_is_highlighted() {
+        let theme = &theme::THEMES[0];
+        let mut e = TextEditor::new("hello");
+        e.step(Motion::Left, true);
+        e.step(Motion::Left, true); // "lo"
+        let lines = editor_lines(&e, 20, theme);
+        assert_eq!(highlighted(&lines[0], theme), "lo");
     }
 
     #[test]
-    fn wrap_labels_title_vs_body_rows_and_keeps_blanks() {
-        let lines = vec!["title".to_string(), String::new(), "body".to_string()];
-        let w = wrap_rows(&lines, Cursor { row: 2, col: 4 }, 20);
-        assert_eq!(w.rows.len(), 3, "blank line is preserved");
-        assert_eq!(w.rows[0].1, 0, "row 0 is the title line");
-        assert_eq!(w.rows[2].1, 2);
-        assert_eq!((w.caret_row, w.caret_col), (2, 4));
+    fn nothing_is_highlighted_without_a_selection() {
+        let theme = &theme::THEMES[0];
+        let e = TextEditor::new("hello");
+        let lines = editor_lines(&e, 20, theme);
+        assert_eq!(highlighted(&lines[0], theme), "");
+    }
+
+    #[test]
+    fn the_caret_is_drawn_only_when_nothing_is_selected() {
+        let theme = &theme::THEMES[0];
+        let mut e = TextEditor::new("hello");
+        assert!(has_caret(&editor_lines(&e, 20, theme)[0]), "caret with no selection");
+        e.step(Motion::Left, true);
+        let lines = editor_lines(&e, 20, theme);
+        assert!(!has_caret(&lines[0]), "the highlight edge is the caret");
+    }
+
+    #[test]
+    fn a_selection_across_lines_marks_the_break_and_both_partial_rows() {
+        let theme = &theme::THEMES[0];
+        let mut e = TextEditor::new("ab\ncd");
+        e.set_cursor(Cursor { row: 0, col: 1 }, false);
+        e.set_cursor(Cursor { row: 1, col: 1 }, true); // "b\nc"
+        let lines = editor_lines(&e, 20, theme);
+        assert_eq!(highlighted(&lines[0], theme), "b ", "the trailing cell is the newline");
+        assert_eq!(highlighted(&lines[1], theme), "c");
+    }
+
+    #[test]
+    fn a_selection_highlights_across_a_wrap_without_inventing_a_break() {
+        let theme = &theme::THEMES[0];
+        let mut e = TextEditor::new("hello world");
+        e.select_all();
+        let lines = editor_lines(&e, 6, theme);
+        assert_eq!(lines.len(), 2, "wrapped into two rows");
+        assert_eq!(
+            highlighted(&lines[0], theme),
+            "hello ",
+            "a wrap continuation has no newline cell to add"
+        );
+        assert_eq!(highlighted(&lines[1], theme), "world");
+    }
+
+    #[test]
+    fn the_footer_offers_the_copy_keys_in_both_modes() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("y copy"), "nav should offer the yank:\n{text}");
+
+        app.on_key(press(KeyCode::Char('n'))); // into the editor
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("select"), "edit should offer selection:\n{text}");
+        assert!(text.contains("copy"), "edit should offer copy:\n{text}");
+    }
+
+    #[test]
+    fn a_copy_takes_over_the_footer_and_the_next_key_gives_it_back() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        app.on_key(press(KeyCode::Char('n')));
+        app.on_key(press(KeyCode::Esc)); // save, still selected in nav
+        app.on_key(press(KeyCode::Char('y')));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("copied 8 chars"), "status missing:\n{text}");
+
+        app.on_key(press(KeyCode::Esc));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(!text.contains("copied"), "status should clear:\n{text}");
+        assert!(text.contains("y copy"), "hints should come back:\n{text}");
+    }
+
+    /// The whole path in one test: real key events into [`App`], a real frame
+    /// out, and the selection visible on it. The per-function tests above each
+    /// cover one side of the app/ui seam; this is the only one that crosses it.
+    #[test]
+    fn shift_arrows_produce_a_visible_highlight_on_a_real_frame() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // viewport + centering
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        for _ in 0..4 {
+            app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let accent = theme::THEMES[0].accent;
+        let buf = terminal.backend().buffer().clone();
+        let picked: String = buf
+            .content()
+            .iter()
+            .filter(|c| c.bg == accent)
+            .map(|c| c.symbol())
+            .collect();
+        assert_eq!(picked, "note", "the last four characters of \"new note\"");
     }
 
     #[test]

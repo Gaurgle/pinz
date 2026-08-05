@@ -8,8 +8,8 @@ switchable "worlds".
 > Status: **usable.** A pannable, zoomable board of post-it notes with a
 > four-level detail ladder, switchable worlds, and mouse move/select. Notes edit
 > in place through one word-wrapped editor - the first line is the title, the
-> rest the body. Pins persist to their own git repo as you work and sync between
-> machines with `pinz sync`.
+> rest the body - with text selection, copy and paste. Pins persist to their own
+> git repo as you work and sync between machines with `pinz sync`.
 
 ## Why it is built this way
 
@@ -24,6 +24,7 @@ crates/
 design/
   pinz-demo.html   interactive look-and-feel prototype (open in a browser)
   DESIGN.md        the decisions behind the model, the zoom ladder, and the seam
+  specs/           one file per feature, written before it was built
 ```
 
 The core depends on no renderer; renderers depend on the core. That one-way
@@ -143,8 +144,36 @@ new world, `n` for a new note, `e` or `enter` to edit the selected
 note (first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves),
-`c` cycles its color (`C` backwards), `d` to delete, `t` to cycle the theme (`T`
-backwards), `q` to quit.
+`y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
+`t` to cycle the theme (`T` backwards), `q` to quit.
+
+### Marking text and copying
+
+While editing a note, **drag across the text** to select it, or hold `shift` with
+any movement key:
+
+| Key | Does |
+| --- | ---- |
+| `shift`+`←``→``↑``↓` | extend the selection by a character or a line |
+| `alt`/`ctrl`+`shift`+`←`/`→` | extend it by a word |
+| `shift`+`home`/`end` | extend it to the start or end of the line |
+| `ctrl`+`a` | select the whole note |
+| `ctrl`+`c` | copy the selection |
+| `ctrl`+`x` | cut it |
+| `cmd`+`←`/`→` | jump to the start or end of the line |
+| `y` (in nav) | copy the selected note whole, title and body |
+
+`ctrl`+`c` still quits when nothing is selected, so the escape hatch survives.
+Typing over a selection replaces it, and `cmd`+`v` pastes back in.
+
+Copying uses **OSC 52**: the text is handed to your terminal, which owns the real
+clipboard. That is what makes it work over SSH with no helper process. Supported
+by iTerm2, Ghostty, kitty, WezTerm and Alacritty; **not** by macOS Terminal.app.
+Inside tmux it needs `set -s set-clipboard on` in your tmux config.
+
+`cmd`+`c` and `cmd`+`←`/`→` are bound too, but most terminals claim those chords
+for themselves and never forward them - they work only where you can configure
+the terminal to pass them through. `ctrl`+`c` and `home`/`end` always work.
 
 There are a few built-in themes - Catppuccin Mocha (default), Tokyo Night,
 Gruvbox, Nord, and Solarized Light. Cycle them live with `t`, or start in one by
