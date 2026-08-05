@@ -20,8 +20,8 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 
 - Rename and delete boards from inside the app. Creating one is done (`w`, or
   the `+` in the tab strip); the other two still mean touching `~/pinz-board` by hand.
-- Move a pin to another board without leaving the board view (the store already
-  moves the file when a pin's board changes).
+- Move a pin to another board *from the keyboard*. Dragging it onto the target
+  world's tab is done; there is no equivalent for a keyboard-only session.
 - Re-center the board on terminal resize.
 - Pile / stacking cascade when notes are dropped together.
 

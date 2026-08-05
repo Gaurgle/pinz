@@ -138,12 +138,30 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// Every span comes from [`App::tabs`], which is also what a click is tested
 /// against - so what you see and what you can hit cannot drift apart.
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let armed = app.drop_target();
     let mut spans = vec![Span::raw(" ")];
     for tab in app.tabs() {
         match tab.kind {
             TabKind::World {
-                name, notes, active, ..
+                index,
+                name,
+                notes,
+                active,
             } => {
+                // An armed tab is the one a released pin would land on. It takes
+                // the accent as a *background* rather than a brighter foreground,
+                // because the active tab already owns the foreground emphasis and
+                // the two must not be mistakable for each other.
+                if armed.is_some_and(|d| d.world == index) {
+                    let style = Style::new()
+                        .bg(theme.accent)
+                        .fg(theme.mantle)
+                        .add_modifier(Modifier::BOLD);
+                    spans.push(Span::styled(" ", style));
+                    spans.push(Span::styled(format!("{name} "), style));
+                    spans.push(Span::styled(format!("{notes}  "), style));
+                    continue;
+                }
                 let (fg, modifier) = if active {
                     (theme.text, Modifier::BOLD)
                 } else {
@@ -167,6 +185,21 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.mantle)),
         area,
     );
+
+    // The pin rides the cursor. Painted last, over the strip, because it is what
+    // keeps the gesture feeling continuous once the note stops tracking the
+    // mouse - without it a drag over the tabs reads as having broken.
+    if let Some(target) = armed {
+        let buf = frame.buffer_mut();
+        if let Some(cell) = buf.cell_mut((target.col, area.y)) {
+            cell.set_symbol("📌");
+        }
+        // A pin is two cells wide; the second is its continuation, which is how
+        // ratatui represents a wide grapheme.
+        if let Some(next) = buf.cell_mut((target.col + 1, area.y)) {
+            next.set_symbol("");
+        }
+    }
 }
 
 fn draw_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -574,6 +607,30 @@ fn content_extent(app: &App) -> Option<(WorldPoint, WorldPoint)> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Mid-drop the footer states the outcome, naming both the pin and where it
+    // is about to go - so a mis-aimed drop is caught before you let go, not
+    // discovered afterwards on a board you were not looking at.
+    if let (Some(target), Some(note)) = (app.drop_target(), app.dragging_note()) {
+        let line = Line::from(vec![
+            Span::styled(" release ", Style::new().fg(theme.overlay1)),
+            Span::styled("to move ", Style::new().fg(theme.overlay1)),
+            Span::styled(
+                format!("\"{}\"", note.title),
+                Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to ", Style::new().fg(theme.overlay1)),
+            Span::styled(
+                app.boards()[target.world].name.clone(),
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::new().bg(theme.mantle)),
+            area,
+        );
+        return;
+    }
+
     // A one-off message takes the whole footer: it is news, and the hints will
     // still be there on the next keystroke. Without this a copy - which changes
     // nothing on screen - would give no sign it happened at all.
@@ -644,6 +701,7 @@ mod tests {
     use super::*;
     use crate::editor::{Cursor, Motion};
     use crate::theme;
+    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
     use pinz_core::{MemoryStore, Store};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1024,6 +1082,117 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert_eq!(picked, "note", "the last four characters of \"new note\"");
+    }
+
+    /// An app mid-drag with a pin held over another world's tab, drawn.
+    fn dragging_over_tab(index: usize) -> (App, Terminal<TestBackend>) {
+        use crate::view::View;
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // establishes viewport + tabs
+
+        // Grab the first pin at its centre.
+        let note = app.active_board().notes[0].clone();
+        let view = View::new(app.camera(), app.viewport());
+        let (cx, cy) = view.cell_of(note.center());
+        let cell = |x: f64, base: u16| (base as f64 + x).round() as u16;
+        app.on_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cell(cx, app.viewport().x),
+            cell(cy, app.viewport().y),
+        ));
+        // Then hover the target world's tab.
+        let tab = app
+            .tabs()
+            .into_iter()
+            .find(|t| matches!(t.kind, TabKind::World { index: i, .. } if i == index))
+            .expect("world tab");
+        let (tc, tr) = (tab.x + tab.width / 2, 1);
+        app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), tc, tr));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        (app, terminal)
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> ratatui::crossterm::event::MouseEvent {
+        ratatui::crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_armed_tab_takes_the_accent_background() {
+        let (app, terminal) = dragging_over_tab(1);
+        let target = app.drop_target().expect("a tab should be armed");
+        assert_eq!(target.world, 1);
+
+        // Asserted as a column range rather than by matching the label text: the
+        // pin glyph deliberately covers two cells of the name, so the visible
+        // characters are not the name any more. The highlighted span is.
+        let tab = app
+            .tabs()
+            .into_iter()
+            .find(|t| matches!(t.kind, TabKind::World { index: 1, .. }))
+            .expect("world tab");
+        let accent = theme::THEMES[0].accent;
+        let buf = terminal.backend().buffer().clone();
+        // The cell after the pin is the continuation of a wide grapheme, and
+        // `Buffer::diff` deliberately skips those - so the test backend still
+        // holds the previous frame's background there. The real terminal draws
+        // the pin across both cells.
+        let continuation = target.col + 1;
+        for x in tab.x..tab.x + tab.width {
+            if x == continuation {
+                continue;
+            }
+            assert_eq!(buf[(x, 1)].bg, accent, "column {x} of the armed tab is not lit");
+        }
+        for x in 0..buf.area.width {
+            if (tab.x..tab.x + tab.width).contains(&x) {
+                continue;
+            }
+            assert_ne!(buf[(x, 1)].bg, accent, "column {x} outside the armed tab is lit");
+        }
+    }
+
+    #[test]
+    fn a_pin_rides_the_cursor_over_the_tab_strip() {
+        let (app, terminal) = dragging_over_tab(1);
+        let col = app.drop_target().unwrap().col;
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(
+            buf[(col, 1)].symbol(),
+            "📌",
+            "the pin should sit under the cursor, not somewhere else in the strip"
+        );
+    }
+
+    #[test]
+    fn the_footer_says_what_the_drop_will_do() {
+        let (app, terminal) = dragging_over_tab(1);
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        let title = &app.boards()[0].notes[0].title;
+        assert!(text.contains("release to move"), "no drop hint:\n{text}");
+        assert!(text.contains(title.as_str()), "the pin is not named:\n{text}");
+        assert!(text.contains(app.boards()[1].name.as_str()), "no destination:\n{text}");
+    }
+
+    #[test]
+    fn no_tab_is_armed_when_nothing_is_being_dragged() {
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let accent = theme::THEMES[0].accent;
+        let buf = terminal.backend().buffer().clone();
+        assert!(
+            !(0..buf.area.width).any(|x| buf[(x, 1)].bg == accent),
+            "nothing should be armed at rest"
+        );
+        assert!(!buffer_text(&buf).contains("release to move"));
     }
 
     #[test]

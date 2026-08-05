@@ -125,6 +125,17 @@ struct Snapshot {
     selected: Option<u64>,
 }
 
+/// Where a dragged pin would land if the button were released now.
+///
+/// The cursor column rides along with the world so the renderer can put the
+/// pin glyph under the cursor without a second, separately-updated field to
+/// keep in step with this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DropTarget {
+    pub world: usize,
+    pub col: u16,
+}
+
 /// A drag in progress, started on mouse-down.
 #[derive(Debug, Clone, Copy)]
 enum Drag {
@@ -183,6 +194,9 @@ pub struct App {
     /// The state as it was before the event being handled. Held across a whole
     /// drag so a gesture becomes one undo step rather than one per mouse-move.
     pending: Option<Snapshot>,
+    /// Where a pin would land if released now, set while a note drag hovers the
+    /// tab strip. The renderer arms that tab.
+    drop_target: Option<DropTarget>,
     should_quit: bool,
 }
 
@@ -221,6 +235,7 @@ impl App {
             undo: VecDeque::new(),
             redo: Vec::new(),
             pending: None,
+            drop_target: None,
             should_quit: false,
         }
     }
@@ -258,6 +273,27 @@ impl App {
     }
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Where a dragged pin would land, for the renderer to arm that tab and put
+    /// the pin under the cursor.
+    pub fn drop_target(&self) -> Option<DropTarget> {
+        self.drop_target
+    }
+
+    /// The note currently being dragged, so the renderer can name it.
+    pub fn dragging_note(&self) -> Option<&Note> {
+        let Some(Drag::Note { id, .. }) = self.drag else {
+            return None;
+        };
+        self.active_board().notes.iter().find(|n| n.id == id)
+    }
+
+    /// The board viewport from the last render. Here for tests and for a
+    /// renderer that needs to un-project a point, as [`App::active_index`] is.
+    #[allow(dead_code)]
+    pub fn viewport(&self) -> Rect {
+        self.viewport
     }
 
     /// A one-off message for the footer, if the last event produced one.
@@ -808,7 +844,7 @@ impl App {
             MouseEventKind::ScrollDown => self.zoom_at(false, m.column, m.row),
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.column, m.row),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.column, m.row),
-            MouseEventKind::Up(MouseButton::Left) => self.drag = None,
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.column, m.row),
             _ => {}
         }
     }
@@ -855,17 +891,32 @@ impl App {
         }
     }
 
+    /// The tab under a column of the strip, if any. Shared by clicking and by
+    /// dropping a pin, so the two cannot resolve a column differently.
+    fn tab_at(&self, col: u16) -> Option<TabKind> {
+        let offset = col.checked_sub(self.tabs.x)?;
+        self.tabs()
+            .into_iter()
+            .find(|t| offset >= t.x && offset < t.x + t.width)
+            .map(|t| t.kind)
+    }
+
+    /// The world under a point, if that point is on the tab strip and lands on a
+    /// world rather than the `+`.
+    fn world_at_point(&self, col: u16, row: u16) -> Option<usize> {
+        if !self.tabs.contains((col, row).into()) {
+            return None;
+        }
+        match self.tab_at(col)? {
+            TabKind::World { index, .. } => Some(index),
+            TabKind::New => None,
+        }
+    }
+
     /// Resolve a click on the tab strip: a world switches to it, the `+` opens
     /// the new-world prompt, and a gap does nothing.
     fn click_tab(&mut self, col: u16) {
-        let Some(offset) = col.checked_sub(self.tabs.x) else {
-            return;
-        };
-        let Some(tab) = self
-            .tabs()
-            .into_iter()
-            .find(|t| offset >= t.x && offset < t.x + t.width)
-        else {
+        let Some(kind) = self.tab_at(col) else {
             return;
         };
         // A click anywhere is also an answer of "not now" to an open prompt.
@@ -873,7 +924,7 @@ impl App {
             self.prompt = None;
             self.mode = Mode::Nav;
         }
-        match tab.kind {
+        match kind {
             TabKind::World { index, .. } => {
                 if self.mode == Mode::Edit {
                     self.commit_edit();
@@ -882,6 +933,28 @@ impl App {
             }
             TabKind::New => self.begin_new_world(),
         }
+    }
+
+    /// Move a pin to another world, keeping where it sits in world space and
+    /// putting it on top of whatever is already there.
+    ///
+    /// The view deliberately stays where it is: the common case is clearing
+    /// several pins off one board in a row, and following each one would cost
+    /// you your place every time. `FileStore` relocates the pin's file on the
+    /// next save, so there is nothing to do here but move it between boards.
+    fn move_note_to_board(&mut self, id: u64, target: usize) {
+        if target == self.active || target >= self.boards.len() {
+            return;
+        }
+        let Some(at) = self.active_board().notes.iter().position(|n| n.id == id) else {
+            return;
+        };
+        let mut note = self.boards[self.active].notes.remove(at);
+        note.z = self.boards[target].notes.iter().map(|n| n.z).max().unwrap_or(0) + 1;
+        self.boards[target].notes.push(note);
+        self.selected = None;
+        self.revision += 1;
+        self.status = Some(format!("moved to {}", self.boards[target].name));
     }
 
     /// The edited note's full cell footprint and the wrap laying out its text.
@@ -923,7 +996,35 @@ impl App {
         Some(wrapped.locate(dy as usize, dx as usize))
     }
 
+    /// Release: a pin let go over another world's tab lands there. Anything
+    /// else just ends the gesture.
+    fn mouse_up(&mut self, col: u16, row: u16) {
+        if let Some(Drag::Note { id, .. }) = self.drag {
+            if let Some(world) = self.world_at_point(col, row) {
+                self.move_note_to_board(id, world);
+            }
+        }
+        self.drag = None;
+        self.drop_target = None;
+    }
+
     fn mouse_drag(&mut self, col: u16, row: u16) {
+        // A note dragged over the strip stops tracking the cursor and arms a
+        // tab instead. Without this the pin would chase the cursor up into the
+        // header, which is neither where it lives nor where it would land.
+        //
+        // Tracking stops over the *whole* strip, not just over the world tabs:
+        // the `+` is not a drop target, but it is still no place for a pin.
+        if matches!(self.drag, Some(Drag::Note { .. })) {
+            let over_strip = self.tabs.contains((col, row).into());
+            self.drop_target = over_strip
+                .then(|| self.world_at_point(col, row))
+                .flatten()
+                .map(|world| DropTarget { world, col });
+            if over_strip {
+                return;
+            }
+        }
         match self.drag {
             Some(Drag::Text) => {
                 if let Some(at) = self.edit_cursor_at(col, row, true) {
@@ -2064,6 +2165,147 @@ mod tests {
             a.on_key(key(KeyCode::Char('u')));
         }
         assert_ne!(color_of(&a), oldest, "the oldest steps should have been evicted");
+    }
+
+    // ---- dropping a pin on another world ----
+
+    /// An app with both a viewport and a tab strip placed, so a gesture can
+    /// travel from the board to the tabs.
+    fn with_tabs() -> App {
+        let mut a = app();
+        a.set_tabs_area(Rect { x: 0, y: 1, width: 100, height: 1 });
+        a
+    }
+
+    /// The cell in the middle of world `index`'s tab.
+    fn cell_of_tab(a: &App, index: usize) -> (u16, u16) {
+        let tab = a
+            .tabs()
+            .into_iter()
+            .find(|t| matches!(t.kind, TabKind::World { index: i, .. } if i == index))
+            .expect("world tab");
+        (a.tabs.x + tab.x + tab.width / 2, a.tabs.y)
+    }
+
+    /// Pick up the first pin on the active board and drag the cursor to `(col, row)`.
+    fn drag_first_pin_to(a: &mut App, col: u16, row: u16) -> u64 {
+        let id = a.active_board().notes[0].id;
+        let (sc, sr) = cell_of_note(a, id);
+        a.on_mouse(mouse_down(sc, sr));
+        assert_eq!(a.selected(), Some(id), "the drag should have grabbed the pin");
+        a.on_mouse(mouse_drag(col, row));
+        id
+    }
+
+    #[test]
+    fn dropping_a_pin_on_another_worlds_tab_moves_it() {
+        let mut a = with_tabs();
+        let before_here = a.active_board().notes.len();
+        let before_there = a.boards()[1].notes.len();
+        let (tc, tr) = cell_of_tab(&a, 1);
+        let id = drag_first_pin_to(&mut a, tc, tr);
+        a.on_mouse(mouse_up(tc, tr));
+
+        assert_eq!(a.active_board().notes.len(), before_here - 1, "left this board");
+        assert_eq!(a.boards()[1].notes.len(), before_there + 1, "landed on that one");
+        assert!(a.boards()[1].notes.iter().any(|n| n.id == id));
+        assert_eq!(a.active_index(), 0, "you stay on the board you were clearing");
+        assert_eq!(a.selected(), None, "the pin is not on this board any more");
+        assert!(a.status().is_some_and(|s| s.contains("moved to")), "{:?}", a.status());
+    }
+
+    #[test]
+    fn a_dropped_pin_keeps_its_coordinates_and_lands_on_top() {
+        let mut a = with_tabs();
+        let note = a.active_board().notes[0].clone();
+        let top_before = a.boards()[1].notes.iter().map(|n| n.z).max().unwrap_or(0);
+        let (tc, tr) = cell_of_tab(&a, 1);
+        drag_first_pin_to(&mut a, tc, tr);
+        a.on_mouse(mouse_up(tc, tr));
+
+        let moved = a.boards()[1].notes.iter().find(|n| n.id == note.id).unwrap();
+        assert_eq!((moved.x, moved.y), (note.x, note.y), "coordinates preserved");
+        assert!(moved.z > top_before, "should sit on top of the target board");
+    }
+
+    #[test]
+    fn a_note_does_not_move_while_the_cursor_is_over_the_tab_strip() {
+        let mut a = with_tabs();
+        let note = a.active_board().notes[0].clone();
+        let (tc, tr) = cell_of_tab(&a, 1);
+        drag_first_pin_to(&mut a, tc, tr);
+        let held = a.active_board().notes.iter().find(|n| n.id == note.id).unwrap();
+        assert_eq!(
+            (held.x, held.y),
+            (note.x, note.y),
+            "the pin must not fly up into the header"
+        );
+    }
+
+    #[test]
+    fn the_drop_target_arms_over_the_strip_and_clears_on_release() {
+        let mut a = with_tabs();
+        let (tc, tr) = cell_of_tab(&a, 1);
+        drag_first_pin_to(&mut a, tc, tr);
+        assert_eq!(a.drop_target().map(|d| d.world), Some(1), "the tab under the cursor is armed");
+
+        // Back onto the board: disarmed, and the pin follows the cursor again.
+        let (bc, br) = (v_area(&a).x + 30, v_area(&a).y + 10);
+        a.on_mouse(mouse_drag(bc, br));
+        assert_eq!(a.drop_target(), None, "leaving the strip disarms it");
+        a.on_mouse(mouse_up(bc, br));
+        assert_eq!(a.drop_target(), None);
+    }
+
+    #[test]
+    fn dropping_a_pin_on_its_own_tab_leaves_it_alone() {
+        let mut a = with_tabs();
+        let (tc, tr) = cell_of_tab(&a, 0); // the board we are already on
+        let id = drag_first_pin_to(&mut a, tc, tr);
+        // Captured after the grab, so this measures the drop and nothing else.
+        let before = a.active_board().notes.clone();
+        a.on_mouse(mouse_up(tc, tr));
+        assert_eq!(
+            a.active_board().notes,
+            before,
+            "a self-drop must change nothing at all, not even stack order"
+        );
+        assert_eq!(a.selected(), Some(id), "the pin is still here and still selected");
+    }
+
+    #[test]
+    fn the_plus_is_never_a_drop_target() {
+        let mut a = with_tabs();
+        let plus = a.tabs().last().unwrap().clone();
+        let (tc, tr) = (a.tabs.x + plus.x + 1, a.tabs.y);
+        let note = a.active_board().notes[0].clone();
+        drag_first_pin_to(&mut a, tc, tr);
+        assert_eq!(a.drop_target(), None, "the + is not a world to drop into");
+
+        // It is still part of the strip, so the pin must not follow the cursor
+        // up there either.
+        let held = a.active_board().notes.iter().find(|n| n.id == note.id).unwrap();
+        assert_eq!((held.x, held.y), (note.x, note.y), "the pin chased the cursor");
+
+        let before = a.active_board().notes.clone();
+        a.on_mouse(mouse_up(tc, tr));
+        assert_eq!(a.active_board().notes, before);
+        assert_eq!(a.mode(), Mode::Nav, "a drop must not open the new-world prompt");
+    }
+
+    #[test]
+    fn moving_a_pin_to_another_world_is_one_undo_step() {
+        let mut a = with_tabs();
+        let before_here = titles(&a);
+        let before_there = a.boards()[1].notes.len();
+        let (tc, tr) = cell_of_tab(&a, 1);
+        drag_first_pin_to(&mut a, tc, tr);
+        a.on_mouse(mouse_up(tc, tr));
+        assert_ne!(titles(&a), before_here);
+
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(titles(&a), before_here, "the pin should be back");
+        assert_eq!(a.boards()[1].notes.len(), before_there, "and gone from the target");
     }
 
     // helpers that reach into private state for assertions
