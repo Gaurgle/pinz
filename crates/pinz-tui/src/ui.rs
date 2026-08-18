@@ -96,7 +96,9 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt, theme: &Theme) {
         )),
         None => Line::from(Span::styled(prompt.hint, Style::new().fg(theme.overlay0))),
     });
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    // trim: false, because with nothing typed the caret line is a single
+    // reversed *space* - trimming leading whitespace would trim the caret away.
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -965,6 +967,26 @@ mod tests {
             !text.contains("esc to cancel"),
             "the reason replaces the hint"
         );
+    }
+
+    #[test]
+    fn the_prompt_caret_is_visible_before_anything_is_typed() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(90, 22)).unwrap();
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        // In prompt mode nothing else on screen uses REVERSED, so any reversed
+        // cell is the caret.
+        let buffer = terminal.backend().buffer().clone();
+        let caret_cells = buffer
+            .content()
+            .iter()
+            .filter(|c| c.modifier.contains(Modifier::REVERSED))
+            .count();
+        assert!(caret_cells > 0, "an empty prompt must still show its caret");
     }
 
     /// Every cell of a rendered line as (char, style), so a test can ask what
