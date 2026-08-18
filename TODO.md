@@ -30,13 +30,8 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 
 ## Sync
 
-- Surface sync state in the UI. It currently only prints around the TUI, so a
-  conflict reported at startup scrolls past before you reach the board.
 - Sync while running, for a board left open for days. Pins are written to disk
   immediately, but only pushed on quit.
-- Consider a merge driver for pin files, so two machines editing the *same* pin
-  merge on position instead of stopping. Only worth it if stopping turns out to
-  be annoying in practice.
 
 ## Graduating a pin into a note
 
