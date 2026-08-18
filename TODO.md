@@ -31,7 +31,13 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 ## Sync
 
 - Sync while running, for a board left open for days. Pins are written to disk
-  immediately, but only pushed on quit.
+  immediately, but only pushed on quit. Design it together with the read-only
+  second instance below - a read-only board that never reloads is the same
+  staleness problem.
+- **One writer per board.** Two instances open on one machine silently clobber
+  each other's edits; git cannot see it because they share a working tree.
+  Designed in `design/specs/2026-08-18-one-writer-per-board.md`: first instance
+  writes, later ones open read-only with a footer warning. Not built.
 
 ## Graduating a pin into a note
 

@@ -341,17 +341,37 @@ impl Sync {
         self.git(&["add", "--", file]).is_some_and(|r| r.ok)
     }
 
-    /// Commit whatever changed and push it, if there is anywhere to push to.
-    pub fn push(&self, message: &str) -> SyncOutcome {
+    /// Checkpoint whatever changed, without sending it anywhere.
+    ///
+    /// Worth its own step because git refuses to pull over uncommitted changes
+    /// to a file the other machine also touched - so a board with unsaved edits
+    /// could not receive the other machine's pins at all. Committing first
+    /// turns that refusal into an ordinary rebase, which [`Sync::pull`] can
+    /// usually settle by itself. The commit is free: the pins are already on
+    /// disk, and quitting would have committed them anyway.
+    pub fn commit(&self, message: &str) -> SyncOutcome {
+        match self.stage_and_commit(message) {
+            Err(outcome) => outcome,
+            Ok(false) => SyncOutcome::Idle("nothing to commit".into()),
+            Ok(true) => SyncOutcome::Done("committed local pins".into()),
+        }
+    }
+
+    /// Stage everything and commit it if anything was staged, reporting whether
+    /// a commit happened. `Err` carries the outcome the caller should return.
+    fn stage_and_commit(&self, message: &str) -> std::result::Result<bool, SyncOutcome> {
         if !self.is_repo() {
-            return SyncOutcome::Idle("not a git repo yet".into());
+            return Err(SyncOutcome::Idle("not a git repo yet".into()));
         }
         match self.git(&["add", "-A"]) {
             Some(r) if r.ok => {}
             Some(r) => {
-                return SyncOutcome::Stopped(format!("git add failed: {}", first_line(&r.stderr)))
+                return Err(SyncOutcome::Stopped(format!(
+                    "git add failed: {}",
+                    first_line(&r.stderr)
+                )))
             }
-            None => return SyncOutcome::Idle("git is not on PATH".into()),
+            None => return Err(SyncOutcome::Idle("git is not on PATH".into())),
         }
 
         // `diff --cached --quiet` exits non-zero when something is staged.
@@ -363,18 +383,27 @@ impl Sync {
             match self.git(&["commit", "-m", message]) {
                 Some(r) if r.ok => {}
                 Some(r) => {
-                    return SyncOutcome::Stopped(format!(
+                    return Err(SyncOutcome::Stopped(format!(
                         "git commit failed: {}",
                         first_line(&if r.stderr.is_empty() {
                             r.stdout
                         } else {
                             r.stderr
                         })
-                    ))
+                    )))
                 }
-                None => return SyncOutcome::Idle("git is not on PATH".into()),
+                None => return Err(SyncOutcome::Idle("git is not on PATH".into())),
             }
         }
+        Ok(staged)
+    }
+
+    /// Commit whatever changed and push it, if there is anywhere to push to.
+    pub fn push(&self, message: &str) -> SyncOutcome {
+        let staged = match self.stage_and_commit(message) {
+            Ok(staged) => staged,
+            Err(outcome) => return outcome,
+        };
 
         if !self.has_remote() {
             let what = if staged {
@@ -673,6 +702,101 @@ mod tests {
             .success());
         git_in(into, &["config", "user.name", "pinz test"]);
         git_in(into, &["config", "user.email", "pinz@test.local"]);
+    }
+
+    #[test]
+    fn commit_records_local_pins_without_sending_them() {
+        let remote = Temp::new("commit-remote");
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new("commit-a");
+        init_repo(a.path());
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        write_pin(a.path(), "ideas", "a.md", "# a\n");
+        Sync::new(a.path()).push("pinz: first");
+
+        write_pin(a.path(), "ideas", "a.md", "# edited\n");
+        let sync = Sync::new(a.path());
+        let out = sync.commit("pinz: checkpoint");
+        assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
+
+        let status = sync.status();
+        assert_eq!(status.dirty, 0, "the edit is committed");
+        assert_eq!(status.ahead, 1, "and is waiting to be pushed, not sent");
+    }
+
+    #[test]
+    fn commit_with_nothing_changed_is_idle() {
+        let t = Temp::new("commit-clean");
+        init_repo(t.path());
+        write_pin(t.path(), "ideas", "a.md", "# a\n");
+        let sync = Sync::new(t.path());
+        sync.commit("pinz: first");
+        let out = sync.commit("pinz: again");
+        assert!(matches!(out, SyncOutcome::Idle(_)), "got {out:?}");
+    }
+
+    /// The first half of the 2026-08-07 incident: the other machine moved, and
+    /// this one has *uncommitted* edits to the same pin. Git refuses to pull
+    /// over those, so checkpointing them first is what lets the pull happen at
+    /// all - and the pin merge then settles the rest.
+    #[test]
+    fn committing_first_rescues_a_pull_that_uncommitted_edits_would_refuse() {
+        let remote = Temp::new("dirty-remote");
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new("dirty-a");
+        init_repo(a.path());
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        let original = "---\nx: 10\ny: 20\nz: 5\ncolor: green\n---\n# Keeper\n\nold todo\n";
+        write_pin(a.path(), "ideas", "keeper.md", original);
+        Sync::new(a.path()).push("pinz: original");
+
+        let b = Temp::new("dirty-b");
+        clone_repo(remote.path(), b.path());
+
+        // A restacks the pin and pushes; B has an uncommitted body edit.
+        write_pin(
+            a.path(),
+            "ideas",
+            "keeper.md",
+            &original.replace("z: 5", "z: 6"),
+        );
+        Sync::new(a.path()).push("pinz: restacked");
+        write_pin(
+            b.path(),
+            "ideas",
+            "keeper.md",
+            &original.replace("old todo", "go with Keeper Commander"),
+        );
+
+        // Prove the dirty tree is what blocks a plain pull, so this test cannot
+        // quietly pass for some other reason.
+        let sync_b = Sync::new(b.path());
+        sync_b.fetch();
+        let refused = sync_b.git(&["merge", "--ff-only", "@{u}"]).unwrap();
+        assert!(
+            !refused.ok,
+            "a dirty tree must be what blocks the plain pull"
+        );
+
+        sync_b.commit("pinz: update pins");
+        let out = sync_b.pull();
+        assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
+
+        let merged = fs::read_to_string(b.path().join("ideas/keeper.md")).unwrap();
+        assert!(
+            merged.contains("go with Keeper Commander"),
+            "the local edit survives:\n{merged}"
+        );
+        assert!(
+            merged.contains("z: 6"),
+            "and so does the remote restack:\n{merged}"
+        );
     }
 
     /// The 2026-08-07 incident, in miniature: both machines restacked the same
