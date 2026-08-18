@@ -6,7 +6,7 @@
 //! drag, hit-test - goes through [`View`], the projection spine, so what you
 //! click is exactly what the math says is under the cursor.
 
-use pinz_core::{Board, Camera, Color, Note, WorldPoint, ZoomLevel, NOTE_H, NOTE_W};
+use pinz_core::{Board, Camera, Color, NOTE_H, NOTE_W, Note, WorldPoint, ZoomLevel};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -191,6 +191,11 @@ pub struct App {
     /// a stopped sync must stay visible for the whole session, because the
     /// alternate screen already ate one such warning for eleven days.
     warning: Option<String>,
+    /// Another pinz owns this board, so this session may look but not touch.
+    /// Enforced in [`Self::end_step`], where every event's changes are undone
+    /// rather than kept - a rule at one choke point rather than a list of
+    /// forbidden keys that a new feature could quietly fall outside of.
+    read_only: bool,
     /// Board states to go back to, oldest first. Capped at [`UNDO_DEPTH`].
     undo: VecDeque<Snapshot>,
     /// States undone past, newest last. Cleared by any fresh change.
@@ -237,6 +242,7 @@ impl App {
             pending_copy: None,
             status: None,
             warning: None,
+            read_only: false,
             undo: VecDeque::new(),
             redo: Vec::new(),
             pending: None,
@@ -327,6 +333,28 @@ impl App {
     /// runner, when a sync stops and the board is running local-only.
     pub fn set_warning(&mut self, message: String) {
         self.warning = Some(message);
+    }
+
+    /// Is this session forbidden from changing the board?
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Say no to an action that would need write access, reporting whether it
+    /// was refused. Used by the two doors into an input mode: `end_step` would
+    /// undo the result anyway, but only after the typing, and an editor whose
+    /// work is discarded on close is a worse answer than never opening one.
+    fn refuse_if_read_only(&mut self) -> bool {
+        if self.read_only {
+            self.status = Some("read-only: another pinz owns this board".into());
+        }
+        self.read_only
+    }
+
+    /// Refuse every change for the rest of the session. For the runner, when
+    /// another pinz already owns this board.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     /// Counter of changes to the boards. Compare it across events to know
@@ -533,6 +561,14 @@ impl App {
         if snap.boards == self.boards {
             return;
         }
+        // Not our board to change: put it back exactly as it was, and say so.
+        // Reverting here rather than refusing each key means a change can only
+        // land if it survives this one check, whatever produced it.
+        if self.read_only {
+            self.restore(snap);
+            self.status = Some("read-only: another pinz owns this board".into());
+            return;
+        }
         if self.undo.len() == UNDO_DEPTH {
             self.undo.pop_front();
         }
@@ -696,6 +732,9 @@ impl App {
     /// the rest the body. Bumps zoom to document so there's room to write and
     /// see the cursor. No-op without a selection.
     fn begin_edit(&mut self) {
+        if self.refuse_if_read_only() {
+            return;
+        }
         let Some(id) = self.selected else { return };
         let Some(note) = self.active_board().notes.iter().find(|n| n.id == id) else {
             return;
@@ -775,6 +814,9 @@ impl App {
 
     /// Open the prompt that names a new world.
     fn begin_new_world(&mut self) {
+        if self.refuse_if_read_only() {
+            return;
+        }
         self.prompt = Some(Prompt {
             title: "new world",
             hint: "enter to create · esc to cancel",
@@ -1885,6 +1927,50 @@ mod tests {
             "hello",
             "copy does not remove text"
         );
+    }
+
+    #[test]
+    fn a_read_only_board_refuses_every_change() {
+        let mut a = app();
+        a.set_read_only(true);
+        let before = a.boards().to_vec();
+
+        // A new pin, an edit, a delete and a recolor: none may land.
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Char('d')));
+        a.on_key(key(KeyCode::Char('c')));
+        assert_eq!(a.boards(), before.as_slice(), "the board must be untouched");
+    }
+
+    #[test]
+    fn a_read_only_board_does_not_open_an_editor() {
+        let mut a = app();
+        a.set_read_only(true);
+        a.on_key(key(KeyCode::Char('e')));
+        assert_eq!(a.mode(), Mode::Nav, "editing is refused outright");
+        assert!(a.editor().is_none());
+        a.on_key(key(KeyCode::Char('w')));
+        assert_eq!(a.mode(), Mode::Nav, "so is naming a new world");
+    }
+
+    #[test]
+    fn a_read_only_board_says_why_it_refused() {
+        let mut a = app();
+        a.set_read_only(true);
+        a.on_key(key(KeyCode::Char('n')));
+        assert!(
+            a.status().is_some_and(|s| s.contains("read-only")),
+            "a refusal must explain itself, got {:?}",
+            a.status()
+        );
+    }
+
+    #[test]
+    fn a_writable_board_still_accepts_changes() {
+        let mut a = app();
+        let before = a.boards().to_vec();
+        a.on_key(key(KeyCode::Char('n')));
+        assert_ne!(a.boards(), before.as_slice(), "the guard must not misfire");
     }
 
     #[test]

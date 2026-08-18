@@ -23,7 +23,11 @@ use std::panic;
 use std::path::{Path, PathBuf};
 
 use app::App;
-use pinz_core::{Board, Color, FileStore, Note, Store, Sync, SyncOutcome};
+use pinz_core::{
+    Board, Color, FileStore, Note, Store, Sync, SyncOutcome,
+    lock::{BoardLock, Ownership},
+};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
@@ -31,9 +35,8 @@ use ratatui::crossterm::{
         Event, KeyEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::Terminal;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -324,12 +327,26 @@ fn run_app(opts: Options) -> io::Result<()> {
     let root = pin_root()?;
     let mut store = FileStore::open(&root).map_err(|e| io::Error::other(e.to_string()))?;
 
+    // One writer per board. A second instance shares this directory, so its
+    // saves would silently overwrite the first one's edits with the pins as
+    // they were when it started - a clash git cannot see. Later instances get
+    // a fully readable board that refuses changes, which is what someone
+    // opening a second window to *look* actually wants. The lock is released
+    // when `_lock` drops, including while a panic unwinds.
+    let (_lock, busy_pid) = match BoardLock::acquire(&root) {
+        Ownership::Owner(lock) => (Some(lock), None),
+        Ownership::Busy { pid } => (None, Some(pid)),
+    };
+    let read_only = busy_pid.is_some();
+
     // Pull before loading, so the board you see is the merged one. A pull that
     // stops leaves local files untouched and only costs us the push on exit.
     // A stopped pull cannot be reported on stderr here: the alternate screen
     // opens moments later and wipes it. It goes into the footer instead, and
     // onto stderr again once the terminal is back.
-    let sync = opts.sync.then(|| Sync::new(&root));
+    // A read-only session runs no git at all: it has nothing to commit, and
+    // pulling under the owner's feet would change files it is working on.
+    let sync = (opts.sync && !read_only).then(|| Sync::new(&root));
     let mut sync_stop: Option<String> = None;
     if let Some(sync) = &sync {
         // Pins left uncommitted by a crash, an offline quit, or a --no-sync run
@@ -347,6 +364,12 @@ fn run_app(opts: Options) -> io::Result<()> {
         boards.push(first_board());
     }
     let mut app = App::new(boards);
+    if let Some(pid) = busy_pid {
+        app.set_read_only(true);
+        app.set_warning(format!(
+            "read-only: pinz {pid} owns this board - changes will not be saved"
+        ));
+    }
     if let Some(stop) = &sync_stop {
         app.set_warning(format!("{stop} - local-only this run"));
     }
@@ -364,9 +387,11 @@ fn run_app(opts: Options) -> io::Result<()> {
     }
 
     // A last save catches anything the loop deferred (a quit mid-drag).
-    if let Err(e) = store.save(app.boards()) {
-        eprintln!("!! could not write pins: {e}");
-        return Ok(());
+    if !app.read_only() {
+        if let Err(e) = store.save(app.boards()) {
+            eprintln!("!! could not write pins: {e}");
+            return Ok(());
+        }
     }
     if let (Some(sync), true) = (&sync, may_push && save_error.is_none()) {
         let pushed = sync.push("pinz: update pins");
@@ -435,8 +460,10 @@ fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<O
         apply(app, event::read()?);
         deliver_copy(&mut io::stdout(), app);
         // Persist as you work, but never mid-gesture: a drag would otherwise
-        // rewrite the pin's file on every mouse-move.
-        if app.revision() != saved && !app.is_dragging() {
+        // rewrite the pin's file on every mouse-move. A read-only session
+        // never writes at all - the app reverts its changes, and this makes
+        // sure not even the revert reaches the disk.
+        if !app.read_only() && app.revision() != saved && !app.is_dragging() {
             if let Err(e) = store.save(app.boards()) {
                 return Ok(Some(e.to_string()));
             }
@@ -753,7 +780,7 @@ mod tests {
 
         let before = app.revision();
         app.on_key(press(KeyCode::Char('n'))); // new pin, opens the editor
-                                               // ctrl+u clears the placeholder title, as it would in the app
+        // ctrl+u clears the placeholder title, as it would in the app
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "buy milk".chars() {
             app.on_key(press(KeyCode::Char(c)));
