@@ -187,6 +187,10 @@ pub struct App {
     /// A one-off message for the footer, cleared by the next event. A copy is
     /// otherwise completely invisible.
     status: Option<String>,
+    /// A sticky warning for the footer, set once at startup and never cleared:
+    /// a stopped sync must stay visible for the whole session, because the
+    /// alternate screen already ate one such warning for eleven days.
+    warning: Option<String>,
     /// Board states to go back to, oldest first. Capped at [`UNDO_DEPTH`].
     undo: VecDeque<Snapshot>,
     /// States undone past, newest last. Cleared by any fresh change.
@@ -232,6 +236,7 @@ impl App {
             revision: 0,
             pending_copy: None,
             status: None,
+            warning: None,
             undo: VecDeque::new(),
             redo: Vec::new(),
             pending: None,
@@ -311,6 +316,17 @@ impl App {
     /// copy actually reached the terminal after the app has stopped looking.
     pub fn set_status(&mut self, message: String) {
         self.status = Some(message);
+    }
+
+    /// The sticky warning, if this session has one.
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// Put a warning in the footer for the rest of the session. For the
+    /// runner, when a sync stops and the board is running local-only.
+    pub fn set_warning(&mut self, message: String) {
+        self.warning = Some(message);
     }
 
     /// Counter of changes to the boards. Compare it across events to know
@@ -660,7 +676,9 @@ impl App {
                 }
             }
             Mode::Prompt => {
-                let Some(prompt) = self.prompt.as_mut() else { return };
+                let Some(prompt) = self.prompt.as_mut() else {
+                    return;
+                };
                 // A world name is a directory name: one line, bounded.
                 for c in text.lines().next().unwrap_or_default().chars() {
                     if prompt.input.chars().count() >= BOARD_NAME_MAX {
@@ -808,7 +826,9 @@ impl App {
     /// typed text intact and the reason shown - retyping a name because of a
     /// stray slash would be its own small insult.
     fn confirm_prompt(&mut self) {
-        let Some(prompt) = self.prompt.as_mut() else { return };
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
         let name = prompt.input.trim().to_string();
         match validate_board_name(&name) {
             Err(why) => prompt.error = Some(why),
@@ -950,7 +970,13 @@ impl App {
             return;
         };
         let mut note = self.boards[self.active].notes.remove(at);
-        note.z = self.boards[target].notes.iter().map(|n| n.z).max().unwrap_or(0) + 1;
+        note.z = self.boards[target]
+            .notes
+            .iter()
+            .map(|n| n.z)
+            .max()
+            .unwrap_or(0)
+            + 1;
         self.boards[target].notes.push(note);
         self.selected = None;
         self.revision += 1;
@@ -1454,7 +1480,14 @@ mod tests {
         a.on_key(key(KeyCode::Char('n')));
         a.on_key(key(KeyCode::Esc)); // save, still selected in Nav
         let id = a.selected().unwrap();
-        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let color_of = |a: &App| {
+            a.active_board()
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .color
+        };
         let before = color_of(&a);
         a.on_key(key(KeyCode::Char('c')));
         assert_ne!(color_of(&a), before, "c should change the color");
@@ -1591,7 +1624,11 @@ mod tests {
         }
         a.on_key(key(KeyCode::Enter));
 
-        assert_eq!(a.mode(), Mode::Prompt, "a bad name does not close the prompt");
+        assert_eq!(
+            a.mode(),
+            Mode::Prompt,
+            "a bad name does not close the prompt"
+        );
         let prompt = a.prompt().unwrap();
         assert_eq!(prompt.input, "a/b", "the typed name survives");
         assert!(prompt.error.is_some(), "and it says why");
@@ -1615,7 +1652,11 @@ mod tests {
             a.on_key(key(KeyCode::Char(c)));
         }
         a.on_key(key(KeyCode::Enter));
-        assert_eq!(a.boards().len(), before, "two directories cannot share a name");
+        assert_eq!(
+            a.boards().len(),
+            before,
+            "two directories cannot share a name"
+        );
         assert_eq!(a.active_board().name, existing);
     }
 
@@ -1644,7 +1685,11 @@ mod tests {
         // Each span starts where the previous one ended: this is what makes a
         // click land on the tab it looks like it landed on.
         for pair in tabs.windows(2) {
-            assert_eq!(pair[0].x + pair[0].width, pair[1].x, "gap or overlap in the strip");
+            assert_eq!(
+                pair[0].x + pair[0].width,
+                pair[1].x,
+                "gap or overlap in the strip"
+            );
         }
         match &tabs[0].kind {
             TabKind::World { index, active, .. } => {
@@ -1658,7 +1703,12 @@ mod tests {
     #[test]
     fn clicking_a_tab_switches_worlds_and_clicking_plus_opens_the_prompt() {
         let mut a = app();
-        a.set_tabs_area(Rect { x: 0, y: 1, width: 100, height: 1 });
+        a.set_tabs_area(Rect {
+            x: 0,
+            y: 1,
+            width: 100,
+            height: 1,
+        });
         let tabs = a.tabs();
 
         // The second world's tab.
@@ -1777,7 +1827,10 @@ mod tests {
     #[test]
     fn alt_shift_arrow_extends_by_word() {
         let mut a = editing("foo bar baz");
-        a.on_key(chord(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT));
+        a.on_key(chord(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
         assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("baz"));
     }
 
@@ -1793,8 +1846,14 @@ mod tests {
     #[test]
     fn cmd_shift_arrow_selects_to_the_line_edge() {
         let mut a = editing("hello");
-        a.on_key(chord(KeyCode::Left, KeyModifiers::SUPER | KeyModifiers::SHIFT));
-        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("hello"));
+        a.on_key(chord(
+            KeyCode::Left,
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(
+            a.editor().unwrap().selected_text().as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -1808,7 +1867,10 @@ mod tests {
     fn ctrl_a_selects_the_whole_note() {
         let mut a = editing("one\ntwo");
         a.on_key(chord(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("one\ntwo"));
+        assert_eq!(
+            a.editor().unwrap().selected_text().as_deref(),
+            Some("one\ntwo")
+        );
     }
 
     #[test]
@@ -1818,7 +1880,11 @@ mod tests {
         a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!a.should_quit(), "a copy must not quit the app");
         assert_eq!(a.take_pending_copy().as_deref(), Some("o"));
-        assert_eq!(a.editor().unwrap().text(), "hello", "copy does not remove text");
+        assert_eq!(
+            a.editor().unwrap().text(),
+            "hello",
+            "copy does not remove text"
+        );
     }
 
     #[test]
@@ -1834,7 +1900,11 @@ mod tests {
         let mut a = editing("hello");
         a.on_key(chord(KeyCode::Char('c'), KeyModifiers::SUPER));
         assert!(!a.should_quit(), "cmd+c is not an escape hatch");
-        assert_eq!(a.take_pending_copy(), None, "nothing selected, nothing copied");
+        assert_eq!(
+            a.take_pending_copy(),
+            None,
+            "nothing selected, nothing copied"
+        );
     }
 
     #[test]
@@ -1887,11 +1957,32 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_warning_stays_up_while_one_off_statuses_come_and_go() {
+        let mut a = app();
+        a.set_warning("sync stopped: the same pin changed on both machines".into());
+        a.on_key(key(KeyCode::Left));
+        assert!(
+            a.warning().is_some_and(|w| w.contains("sync stopped")),
+            "a keystroke must not clear the warning"
+        );
+        a.set_status("copied 3 chars".into());
+        a.on_key(key(KeyCode::Left));
+        assert!(
+            a.warning().is_some(),
+            "a one-off status clearing must not take the warning with it"
+        );
+    }
+
+    #[test]
     fn a_copy_reports_a_status_that_the_next_key_clears() {
         let mut a = editing("hello");
         a.on_key(chord(KeyCode::Left, KeyModifiers::SHIFT));
         a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(a.status().is_some_and(|s| s.contains("copied")), "{:?}", a.status());
+        assert!(
+            a.status().is_some_and(|s| s.contains("copied")),
+            "{:?}",
+            a.status()
+        );
         a.on_key(key(KeyCode::Left));
         assert_eq!(a.status(), None);
     }
@@ -1955,7 +2046,10 @@ mod tests {
         a.on_mouse(mouse_down(c0, r0));
         assert_eq!(a.editor().unwrap().cursor(), Cursor { row: 0, col: 0 });
         a.on_mouse(mouse_drag(c0 + 5, r0));
-        assert_eq!(a.editor().unwrap().selected_text().as_deref(), Some("hello"));
+        assert_eq!(
+            a.editor().unwrap().selected_text().as_deref(),
+            Some("hello")
+        );
         assert_eq!(a.mode(), Mode::Edit, "a text drag must not end the edit");
     }
 
@@ -1977,20 +2071,31 @@ mod tests {
         a.on_mouse(mouse_down(c0, r0));
         a.on_mouse(mouse_drag(c0 + 500, r0));
         let selected = a.editor().unwrap().selected_text().unwrap();
-        assert!(selected.starts_with("hello"), "clamped to the row's end: {selected:?}");
+        assert!(
+            selected.starts_with("hello"),
+            "clamped to the row's end: {selected:?}"
+        );
     }
 
     #[test]
     fn clicking_outside_the_edited_note_still_commits_the_edit() {
         let mut a = editing("hello");
         a.on_mouse(mouse_down(a.viewport.x, a.viewport.y));
-        assert_eq!(a.mode(), Mode::Nav, "a click on the board saves and leaves edit");
+        assert_eq!(
+            a.mode(),
+            Mode::Nav,
+            "a click on the board saves and leaves edit"
+        );
     }
 
     // ---- undo / redo ----
 
     fn titles(a: &App) -> Vec<String> {
-        a.active_board().notes.iter().map(|n| n.title.clone()).collect()
+        a.active_board()
+            .notes
+            .iter()
+            .map(|n| n.title.clone())
+            .collect()
     }
 
     /// Title and body of every note. The editor opens with the cursor at the end
@@ -2031,7 +2136,14 @@ mod tests {
         let mut a = app();
         let id = a.active_board().notes[0].id;
         a.selected = Some(id);
-        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let color_of = |a: &App| {
+            a.active_board()
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .color
+        };
         let before = color_of(&a);
         a.on_key(key(KeyCode::Char('c')));
         assert_ne!(color_of(&a), before);
@@ -2051,7 +2163,11 @@ mod tests {
         a.on_key(key(KeyCode::Esc)); // one edit, three keystrokes
         assert_ne!(contents(&a), before);
         a.on_key(key(KeyCode::Char('u')));
-        assert_eq!(contents(&a), before, "one undo should take back the whole edit");
+        assert_eq!(
+            contents(&a),
+            before,
+            "one undo should take back the whole edit"
+        );
     }
 
     #[test]
@@ -2064,7 +2180,11 @@ mod tests {
         a.on_key(key(KeyCode::Char('e')));
         a.on_key(key(KeyCode::Esc)); // opened and closed, changed nothing
         a.on_key(key(KeyCode::Char('u')));
-        assert_ne!(contents(&a), deleted, "the no-op edit must not eat the undo");
+        assert_ne!(
+            contents(&a),
+            deleted,
+            "the no-op edit must not eat the undo"
+        );
     }
 
     #[test]
@@ -2075,7 +2195,11 @@ mod tests {
         // Aim at the note's centre: a corner rounds outside it at this zoom.
         let (sc, sr) = cell_of_note(&a, id);
         a.on_mouse(mouse_down(sc, sr));
-        assert_eq!(a.selected(), Some(id), "the drag should have grabbed the note");
+        assert_eq!(
+            a.selected(),
+            Some(id),
+            "the drag should have grabbed the note"
+        );
         for step in 1..=5 {
             a.on_mouse(mouse_drag(sc + step, sr + step));
         }
@@ -2085,7 +2209,11 @@ mod tests {
 
         a.on_key(key(KeyCode::Char('u')));
         let back = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
-        assert_eq!((back.x, back.y), (x0, y0), "one undo should take back the whole drag");
+        assert_eq!(
+            (back.x, back.y),
+            (x0, y0),
+            "one undo should take back the whole drag"
+        );
     }
 
     #[test]
@@ -2123,7 +2251,11 @@ mod tests {
         a.on_key(key(KeyCode::Char('c'))); // a fresh action
         let after = titles(&a);
         a.on_key(chord(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert_eq!(titles(&a), after, "redo must not resurrect a discarded future");
+        assert_eq!(
+            titles(&a),
+            after,
+            "redo must not resurrect a discarded future"
+        );
     }
 
     #[test]
@@ -2133,7 +2265,11 @@ mod tests {
         a.on_key(key(KeyCode::Char('u')));
         a.on_key(chord(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(titles(&a), before);
-        assert!(a.status().is_some_and(|s| s.contains("nothing")), "{:?}", a.status());
+        assert!(
+            a.status().is_some_and(|s| s.contains("nothing")),
+            "{:?}",
+            a.status()
+        );
     }
 
     #[test]
@@ -2156,7 +2292,14 @@ mod tests {
         let mut a = app();
         let id = a.active_board().notes[0].id;
         a.selected = Some(id);
-        let color_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().color;
+        let color_of = |a: &App| {
+            a.active_board()
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .color
+        };
         let oldest = color_of(&a);
         for _ in 0..(UNDO_DEPTH + 10) {
             a.on_key(key(KeyCode::Char('c')));
@@ -2164,7 +2307,11 @@ mod tests {
         for _ in 0..(UNDO_DEPTH + 10) {
             a.on_key(key(KeyCode::Char('u')));
         }
-        assert_ne!(color_of(&a), oldest, "the oldest steps should have been evicted");
+        assert_ne!(
+            color_of(&a),
+            oldest,
+            "the oldest steps should have been evicted"
+        );
     }
 
     // ---- dropping a pin on another world ----
@@ -2173,7 +2320,12 @@ mod tests {
     /// travel from the board to the tabs.
     fn with_tabs() -> App {
         let mut a = app();
-        a.set_tabs_area(Rect { x: 0, y: 1, width: 100, height: 1 });
+        a.set_tabs_area(Rect {
+            x: 0,
+            y: 1,
+            width: 100,
+            height: 1,
+        });
         a
     }
 
@@ -2192,7 +2344,11 @@ mod tests {
         let id = a.active_board().notes[0].id;
         let (sc, sr) = cell_of_note(a, id);
         a.on_mouse(mouse_down(sc, sr));
-        assert_eq!(a.selected(), Some(id), "the drag should have grabbed the pin");
+        assert_eq!(
+            a.selected(),
+            Some(id),
+            "the drag should have grabbed the pin"
+        );
         a.on_mouse(mouse_drag(col, row));
         id
     }
@@ -2206,12 +2362,28 @@ mod tests {
         let id = drag_first_pin_to(&mut a, tc, tr);
         a.on_mouse(mouse_up(tc, tr));
 
-        assert_eq!(a.active_board().notes.len(), before_here - 1, "left this board");
-        assert_eq!(a.boards()[1].notes.len(), before_there + 1, "landed on that one");
+        assert_eq!(
+            a.active_board().notes.len(),
+            before_here - 1,
+            "left this board"
+        );
+        assert_eq!(
+            a.boards()[1].notes.len(),
+            before_there + 1,
+            "landed on that one"
+        );
         assert!(a.boards()[1].notes.iter().any(|n| n.id == id));
-        assert_eq!(a.active_index(), 0, "you stay on the board you were clearing");
+        assert_eq!(
+            a.active_index(),
+            0,
+            "you stay on the board you were clearing"
+        );
         assert_eq!(a.selected(), None, "the pin is not on this board any more");
-        assert!(a.status().is_some_and(|s| s.contains("moved to")), "{:?}", a.status());
+        assert!(
+            a.status().is_some_and(|s| s.contains("moved to")),
+            "{:?}",
+            a.status()
+        );
     }
 
     #[test]
@@ -2223,9 +2395,20 @@ mod tests {
         drag_first_pin_to(&mut a, tc, tr);
         a.on_mouse(mouse_up(tc, tr));
 
-        let moved = a.boards()[1].notes.iter().find(|n| n.id == note.id).unwrap();
-        assert_eq!((moved.x, moved.y), (note.x, note.y), "coordinates preserved");
-        assert!(moved.z > top_before, "should sit on top of the target board");
+        let moved = a.boards()[1]
+            .notes
+            .iter()
+            .find(|n| n.id == note.id)
+            .unwrap();
+        assert_eq!(
+            (moved.x, moved.y),
+            (note.x, note.y),
+            "coordinates preserved"
+        );
+        assert!(
+            moved.z > top_before,
+            "should sit on top of the target board"
+        );
     }
 
     #[test]
@@ -2234,7 +2417,12 @@ mod tests {
         let note = a.active_board().notes[0].clone();
         let (tc, tr) = cell_of_tab(&a, 1);
         drag_first_pin_to(&mut a, tc, tr);
-        let held = a.active_board().notes.iter().find(|n| n.id == note.id).unwrap();
+        let held = a
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == note.id)
+            .unwrap();
         assert_eq!(
             (held.x, held.y),
             (note.x, note.y),
@@ -2247,7 +2435,11 @@ mod tests {
         let mut a = with_tabs();
         let (tc, tr) = cell_of_tab(&a, 1);
         drag_first_pin_to(&mut a, tc, tr);
-        assert_eq!(a.drop_target().map(|d| d.world), Some(1), "the tab under the cursor is armed");
+        assert_eq!(
+            a.drop_target().map(|d| d.world),
+            Some(1),
+            "the tab under the cursor is armed"
+        );
 
         // Back onto the board: disarmed, and the pin follows the cursor again.
         let (bc, br) = (v_area(&a).x + 30, v_area(&a).y + 10);
@@ -2270,7 +2462,11 @@ mod tests {
             before,
             "a self-drop must change nothing at all, not even stack order"
         );
-        assert_eq!(a.selected(), Some(id), "the pin is still here and still selected");
+        assert_eq!(
+            a.selected(),
+            Some(id),
+            "the pin is still here and still selected"
+        );
     }
 
     #[test]
@@ -2284,13 +2480,26 @@ mod tests {
 
         // It is still part of the strip, so the pin must not follow the cursor
         // up there either.
-        let held = a.active_board().notes.iter().find(|n| n.id == note.id).unwrap();
-        assert_eq!((held.x, held.y), (note.x, note.y), "the pin chased the cursor");
+        let held = a
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == note.id)
+            .unwrap();
+        assert_eq!(
+            (held.x, held.y),
+            (note.x, note.y),
+            "the pin chased the cursor"
+        );
 
         let before = a.active_board().notes.clone();
         a.on_mouse(mouse_up(tc, tr));
         assert_eq!(a.active_board().notes, before);
-        assert_eq!(a.mode(), Mode::Nav, "a drop must not open the new-world prompt");
+        assert_eq!(
+            a.mode(),
+            Mode::Nav,
+            "a drop must not open the new-world prompt"
+        );
     }
 
     #[test]
@@ -2305,7 +2514,11 @@ mod tests {
 
         a.on_key(key(KeyCode::Char('u')));
         assert_eq!(titles(&a), before_here, "the pin should be back");
-        assert_eq!(a.boards()[1].notes.len(), before_there, "and gone from the target");
+        assert_eq!(
+            a.boards()[1].notes.len(),
+            before_there,
+            "and gone from the target"
+        );
     }
 
     // helpers that reach into private state for assertions

@@ -244,9 +244,15 @@ Setup lives under [Install](#install); this is what sync does once it is running
 
 `~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits and
 pushes when you quit; `pinz sync` does both on demand. It only ever touches its own repo, so it can
-never sweep up or be blocked by work in progress anywhere else. If the same pin
-changed on both machines, pinz **stops**, leaves the repo exactly as it was and
-tells you - resolving that is a human's call, not a corkboard's.
+never sweep up or be blocked by work in progress anywhere else.
+
+When the same pin changed on both machines, pinz settles what it safely can:
+position and color changes merge on their own (moving a pin on one machine and
+editing its text on the other is not a real conflict), and a tie on position
+goes to the machine you are sitting at. Only when both machines changed a pin's
+*text* differently does pinz **stop**, leave the repo exactly as it was, and
+tell you - in the footer if the board is open, on the terminal otherwise.
+Resolving that is a human's call, not a corkboard's.
 
 Pins are deliberately separate from your notez2 notes. A pin that turns out to
 matter is meant to graduate into a real note later; nothing here reads or writes

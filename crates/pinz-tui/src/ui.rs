@@ -9,7 +9,7 @@
 //! All color comes from the active [`Theme`], never a hardcoded constant, so a
 //! theme swap re-skins every widget with no other change.
 
-use pinz_core::{Note, WorldPoint, ZoomLevel};
+use pinz_core::{Color as NoteColor, Note, WorldPoint, ZoomLevel};
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -82,12 +82,18 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt, theme: &Theme) {
     let mut lines = vec![
         Line::from(vec![
             Span::styled(prompt.input.clone(), Style::new().fg(theme.text)),
-            Span::styled(" ", Style::new().fg(theme.text).add_modifier(Modifier::REVERSED)),
+            Span::styled(
+                " ",
+                Style::new().fg(theme.text).add_modifier(Modifier::REVERSED),
+            ),
         ]),
         Line::raw(""),
     ];
     lines.push(match &prompt.error {
-        Some(error) => Line::from(Span::styled(error.clone(), Style::new().fg(theme.note(pinz_core::Color::Red)))),
+        Some(error) => Line::from(Span::styled(
+            error.clone(),
+            Style::new().fg(theme.note(pinz_core::Color::Red)),
+        )),
         None => Line::from(Span::styled(prompt.hint, Style::new().fg(theme.overlay0))),
     });
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
@@ -354,7 +360,9 @@ fn draw_note_widget(
             lines.push(Line::raw(""));
             lines.extend(body_lines(&note.body, theme.note_fg));
         }
-        Paragraph::new(lines).wrap(Wrap { trim: true }).render(inner, buf);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .render(inner, buf);
     });
 }
 
@@ -365,12 +373,7 @@ fn draw_note_widget(
 /// themselves out to the rect they are given, so handing one a rect already
 /// trimmed to the screen edge would re-wrap its text every time the note moved.
 /// Here the layout is computed once at full size and the edge only ever cuts.
-fn paint_clipped(
-    frame: &mut Frame,
-    cells: CellRect,
-    area: Rect,
-    render: impl FnOnce(&mut Buffer),
-) {
+fn paint_clipped(frame: &mut Frame, cells: CellRect, area: Rect, render: impl FnOnce(&mut Buffer)) {
     let Some(visible) = cells.clip(area) else {
         return;
     };
@@ -421,9 +424,7 @@ fn editor_lines(editor: &TextEditor, width: usize, theme: &Theme) -> Vec<Line<'s
     let selection = editor
         .selection()
         .map(|(start, end)| (wrapped.place(start), wrapped.place(end)));
-    let caret = selection
-        .is_none()
-        .then(|| wrapped.place(editor.cursor()));
+    let caret = selection.is_none().then(|| wrapped.place(editor.cursor()));
 
     wrapped
         .rows
@@ -646,6 +647,23 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
+    // A sticky warning sits below one-off news but above the hints: a stopped
+    // sync stays visible for the whole session, unlike the pre-TUI stderr line
+    // the alternate screen used to eat.
+    if let Some(warning) = app.warning() {
+        let line = Line::from(Span::styled(
+            format!(" !! {warning} "),
+            Style::new()
+                .fg(theme.note(NoteColor::Red))
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(
+            Paragraph::new(line).style(Style::new().bg(theme.mantle)),
+            area,
+        );
+        return;
+    }
+
     let hint = match app.mode() {
         Mode::Prompt => Line::from(vec![
             Span::styled(
@@ -701,9 +719,9 @@ mod tests {
     use super::*;
     use crate::editor::{Cursor, Motion};
     use crate::theme;
-    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
     use pinz_core::{MemoryStore, Store};
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
 
     fn render_with(theme_name: Option<&str>) -> ratatui::buffer::Buffer {
@@ -779,8 +797,14 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
 
         let text = buffer_text(&terminal.backend().buffer().clone());
-        assert!(text.contains("new note"), "title should be on screen:\n{text}");
-        assert!(text.contains("hello"), "typed body should be on screen:\n{text}");
+        assert!(
+            text.contains("new note"),
+            "title should be on screen:\n{text}"
+        );
+        assert!(
+            text.contains("hello"),
+            "typed body should be on screen:\n{text}"
+        );
     }
 
     #[test]
@@ -933,8 +957,14 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
         assert!(text.contains("no slashes"), "reason missing:\n{text}");
-        assert!(text.contains("reading/"), "typed name should survive:\n{text}");
-        assert!(!text.contains("esc to cancel"), "the reason replaces the hint");
+        assert!(
+            text.contains("reading/"),
+            "typed name should survive:\n{text}"
+        );
+        assert!(
+            !text.contains("esc to cancel"),
+            "the reason replaces the hint"
+        );
     }
 
     /// Every cell of a rendered line as (char, style), so a test can ask what
@@ -982,7 +1012,10 @@ mod tests {
     fn the_caret_is_drawn_only_when_nothing_is_selected() {
         let theme = &theme::THEMES[0];
         let mut e = TextEditor::new("hello");
-        assert!(has_caret(&editor_lines(&e, 20, theme)[0]), "caret with no selection");
+        assert!(
+            has_caret(&editor_lines(&e, 20, theme)[0]),
+            "caret with no selection"
+        );
         e.step(Motion::Left, true);
         let lines = editor_lines(&e, 20, theme);
         assert!(!has_caret(&lines[0]), "the highlight edge is the caret");
@@ -995,7 +1028,11 @@ mod tests {
         e.set_cursor(Cursor { row: 0, col: 1 }, false);
         e.set_cursor(Cursor { row: 1, col: 1 }, true); // "b\nc"
         let lines = editor_lines(&e, 20, theme);
-        assert_eq!(highlighted(&lines[0], theme), "b ", "the trailing cell is the newline");
+        assert_eq!(
+            highlighted(&lines[0], theme),
+            "b ",
+            "the trailing cell is the newline"
+        );
         assert_eq!(highlighted(&lines[1], theme), "c");
     }
 
@@ -1024,12 +1061,18 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
-        assert!(text.contains("y copy"), "nav should offer the yank:\n{text}");
+        assert!(
+            text.contains("y copy"),
+            "nav should offer the yank:\n{text}"
+        );
 
         app.on_key(press(KeyCode::Char('n'))); // into the editor
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
-        assert!(text.contains("select"), "edit should offer selection:\n{text}");
+        assert!(
+            text.contains("select"),
+            "edit should offer selection:\n{text}"
+        );
         assert!(text.contains("copy"), "edit should offer copy:\n{text}");
     }
 
@@ -1148,13 +1191,21 @@ mod tests {
             if x == continuation {
                 continue;
             }
-            assert_eq!(buf[(x, 1)].bg, accent, "column {x} of the armed tab is not lit");
+            assert_eq!(
+                buf[(x, 1)].bg,
+                accent,
+                "column {x} of the armed tab is not lit"
+            );
         }
         for x in 0..buf.area.width {
             if (tab.x..tab.x + tab.width).contains(&x) {
                 continue;
             }
-            assert_ne!(buf[(x, 1)].bg, accent, "column {x} outside the armed tab is lit");
+            assert_ne!(
+                buf[(x, 1)].bg,
+                accent,
+                "column {x} outside the armed tab is lit"
+            );
         }
     }
 
@@ -1176,8 +1227,14 @@ mod tests {
         let text = buffer_text(&terminal.backend().buffer().clone());
         let title = &app.boards()[0].notes[0].title;
         assert!(text.contains("release to move"), "no drop hint:\n{text}");
-        assert!(text.contains(title.as_str()), "the pin is not named:\n{text}");
-        assert!(text.contains(app.boards()[1].name.as_str()), "no destination:\n{text}");
+        assert!(
+            text.contains(title.as_str()),
+            "the pin is not named:\n{text}"
+        );
+        assert!(
+            text.contains(app.boards()[1].name.as_str()),
+            "no destination:\n{text}"
+        );
     }
 
     #[test]

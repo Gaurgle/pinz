@@ -270,7 +270,9 @@ fn remote_advice(root: &Path, created: bool) -> String {
     lines.push("     your pins already live in a repo, pushed from another machine?".into());
     lines.push("     clone it. do not add a remote here - the histories are unrelated".into());
     lines.push("     and git will refuse to merge them:".into());
-    lines.push(format!("         mv {root} {root}.bak && git clone <url> {root}"));
+    lines.push(format!(
+        "         mv {root} {root}.bak && git clone <url> {root}"
+    ));
     lines.push("     this is your first machine? create the remote:".into());
     lines.push(format!(
         "         cd {root} && gh repo create pinz-board --private --source=. --push"
@@ -313,22 +315,27 @@ fn run_app(opts: Options) -> io::Result<()> {
 
     // Pull before loading, so the board you see is the merged one. A pull that
     // stops leaves local files untouched and only costs us the push on exit.
+    // A stopped pull cannot be reported on stderr here: the alternate screen
+    // opens moments later and wipes it. It goes into the footer instead, and
+    // onto stderr again once the terminal is back.
     let sync = opts.sync.then(|| Sync::new(&root));
-    let mut may_push = true;
+    let mut sync_stop: Option<String> = None;
     if let Some(sync) = &sync {
         let pulled = sync.pull();
         if pulled.is_stopped() {
-            may_push = false;
-            eprintln!("!! {}", pulled.message());
-            eprintln!("   your pins are safe and the board still opens; pinz will not push this run.");
+            sync_stop = Some(pulled.message().to_string());
         }
     }
+    let may_push = sync_stop.is_none();
 
     let mut boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
     if boards.is_empty() {
         boards.push(first_board());
     }
     let mut app = App::new(boards);
+    if let Some(stop) = &sync_stop {
+        app.set_warning(format!("{stop} - local-only this run"));
+    }
     if let Some(name) = &opts.theme {
         app.set_theme_by_name(name);
     }
@@ -352,6 +359,12 @@ fn run_app(opts: Options) -> io::Result<()> {
         if pushed.is_stopped() {
             eprintln!("!! {}", pushed.message());
         }
+    }
+    // Now that the terminal is ours again, the startup stop also lands in
+    // scrollback - the footer warning disappeared with the alternate screen.
+    if let Some(stop) = &sync_stop {
+        eprintln!("!! {stop}");
+        eprintln!("   pinz did not push this run; resolve, then run `pinz sync`.");
     }
     Ok(())
 }
@@ -478,7 +491,12 @@ mod tests {
     fn editing_app() -> App {
         let mut store = pinz_core::MemoryStore::seeded();
         let mut app = App::new(store.load().unwrap());
-        app.set_viewport(ratatui::layout::Rect { x: 0, y: 2, width: 100, height: 30 });
+        app.set_viewport(ratatui::layout::Rect {
+            x: 0,
+            y: 2,
+            width: 100,
+            height: 30,
+        });
         apply(&mut app, press(KeyCode::Char('n'), KeyModifiers::NONE));
         app
     }
@@ -511,7 +529,11 @@ mod tests {
                 state: KeyEventState::NONE,
             }),
         );
-        assert_eq!(app.editor().unwrap().text(), before, "a release must not type");
+        assert_eq!(
+            app.editor().unwrap().text(),
+            before,
+            "a release must not type"
+        );
     }
 
     #[test]
@@ -591,7 +613,11 @@ mod tests {
                 "{word:?} must not be a shortcut for anything that moves commits"
             );
         }
-        assert_eq!(parse(&["st"]).command, Command::Status, "st is read-only, so it may be short");
+        assert_eq!(
+            parse(&["st"]).command,
+            Command::Status,
+            "st is read-only, so it may be short"
+        );
     }
 
     #[test]
@@ -599,7 +625,11 @@ mod tests {
         // The aliases must not swallow theme names.
         for theme in ["nord", "gruvbox", "light", "mocha", "tokyo"] {
             let o = parse(&[theme]);
-            assert_eq!(o.command, Command::Run, "{theme:?} should just open the board");
+            assert_eq!(
+                o.command,
+                Command::Run,
+                "{theme:?} should just open the board"
+            );
             assert_eq!(o.theme.as_deref(), Some(theme));
         }
     }
@@ -612,14 +642,19 @@ mod tests {
         // the one that is safe either way.
         let advice = remote_advice(Path::new("/home/x/pinz-board"), false);
         let clone = advice.find("git clone").expect("cloning must be offered");
-        let create = advice.find("gh repo create").expect("creating a remote must be offered");
+        let create = advice
+            .find("gh repo create")
+            .expect("creating a remote must be offered");
         assert!(clone < create, "cloning has to come first:\n{advice}");
     }
 
     #[test]
     fn advice_names_the_board_it_is_talking_about() {
         let advice = remote_advice(Path::new("/tmp/scratch-board"), false);
-        assert!(advice.contains("/tmp/scratch-board"), "advice must be copy-pasteable:\n{advice}");
+        assert!(
+            advice.contains("/tmp/scratch-board"),
+            "advice must be copy-pasteable:\n{advice}"
+        );
     }
 
     #[test]
@@ -627,7 +662,10 @@ mod tests {
         // Someone who expected their pins to be here needs to know the directory
         // is new, not that their notes vanished.
         let fresh = remote_advice(Path::new("/home/x/pinz-board"), true);
-        assert!(fresh.contains("new"), "a created board must announce itself:\n{fresh}");
+        assert!(
+            fresh.contains("new"),
+            "a created board must announce itself:\n{fresh}"
+        );
 
         let existing = remote_advice(Path::new("/home/x/pinz-board"), false);
         assert!(
@@ -701,7 +739,7 @@ mod tests {
 
         let before = app.revision();
         app.on_key(press(KeyCode::Char('n'))); // new pin, opens the editor
-        // ctrl+u clears the placeholder title, as it would in the app
+                                               // ctrl+u clears the placeholder title, as it would in the app
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "buy milk".chars() {
             app.on_key(press(KeyCode::Char(c)));
@@ -711,7 +749,10 @@ mod tests {
             app.on_key(press(KeyCode::Char(c)));
         }
         app.on_key(press(KeyCode::Esc)); // save the edit
-        assert!(app.revision() > before, "the runner would now write to disk");
+        assert!(
+            app.revision() > before,
+            "the runner would now write to disk"
+        );
 
         store.save(app.boards()).unwrap();
 

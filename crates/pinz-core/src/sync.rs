@@ -17,6 +17,8 @@
 //! you.
 
 use std::path::{Path, PathBuf};
+
+use crate::merge::merge_pin;
 use std::process::Command;
 
 /// What a sync step did.
@@ -239,17 +241,104 @@ impl Sync {
         }
         match self.git(&["rebase", "@{u}"]) {
             Some(r) if r.ok => SyncOutcome::Done(format!("replayed {ahead} local commit(s)")),
-            Some(_) => {
-                // Leave no half-finished rebase behind.
-                let _ = self.git(&["rebase", "--abort"]);
-                SyncOutcome::Stopped(format!(
-                    "the same pin changed on both machines - {} local and {behind} remote commit(s) conflict; resolve in {}",
-                    ahead,
-                    self.root.display()
-                ))
-            }
+            Some(_) => self.resolve_conflicted_rebase(behind, ahead),
             None => SyncOutcome::Stopped("git is not on PATH".into()),
         }
+    }
+
+    /// A rebase has stopped on conflicts. Try to settle each conflicted pin
+    /// with [`merge_pin`]; if every one resolves, the rebase continues,
+    /// otherwise it is aborted so the repo is exactly as it was before the
+    /// pull. Cosmetics (position, color) are never worth stopping a sync over;
+    /// a real content conflict still is.
+    fn resolve_conflicted_rebase(&self, behind: u32, ahead: u32) -> SyncOutcome {
+        let stop = || {
+            // Leave no half-finished rebase behind.
+            let _ = self.git(&["rebase", "--abort"]);
+            SyncOutcome::Stopped(format!(
+                "the same pin changed on both machines - {ahead} local and {behind} remote commit(s) conflict; resolve in {}",
+                self.root.display()
+            ))
+        };
+
+        // Each pass settles one replayed commit's conflicts; `--continue` then
+        // either finishes or stops on the next commit. Bounded by `ahead`
+        // because that is every commit the rebase can possibly stop on.
+        let mut merged_pins = 0usize;
+        for _ in 0..ahead {
+            let Some(conflicts) = self.conflicted_pin_files() else {
+                return stop();
+            };
+            for file in &conflicts {
+                if !self.resolve_pin_conflict(file) {
+                    return stop();
+                }
+            }
+            merged_pins += conflicts.len();
+            // `core.editor=true` keeps the reworded-commit editor from ever
+            // opening; the message is kept as it was.
+            match self.git(&["-c", "core.editor=true", "rebase", "--continue"]) {
+                Some(r) if r.ok => {
+                    return SyncOutcome::Done(format!(
+                        "replayed {ahead} local commit(s), auto-merged {merged_pins} pin(s)"
+                    ));
+                }
+                Some(_) => {} // stopped on the next commit; go around again
+                None => return stop(),
+            }
+        }
+        stop()
+    }
+
+    /// The files the stopped rebase is conflicted on - but only if every one
+    /// of them is a both-modified `.md` file. Any other conflict shape (a
+    /// delete against an edit, both machines adding different files, a
+    /// non-pin file) means this is not ours to settle: `None`.
+    fn conflicted_pin_files(&self) -> Option<Vec<String>> {
+        // `-z` gives NUL-separated entries with unquoted paths, so board names
+        // with spaces survive.
+        let out = self.git(&["status", "--porcelain", "-z"])?;
+        if !out.ok {
+            return None;
+        }
+        let mut conflicts = Vec::new();
+        for entry in out.stdout.split('\0').filter(|e| e.len() > 3) {
+            let (code, path) = entry.split_at(2);
+            let path = path.trim_start();
+            if !code.contains('U') && code != "AA" && code != "DD" {
+                continue; // not a conflict entry (a cleanly-applied file)
+            }
+            if code != "UU" || !path.ends_with(".md") {
+                return None;
+            }
+            conflicts.push(path.to_string());
+        }
+        if conflicts.is_empty() {
+            return None; // stopped for a reason we do not understand
+        }
+        Some(conflicts)
+    }
+
+    /// Settle one both-modified pin file and stage the result. During a rebase
+    /// stage 2 is the upstream (remote) side and stage 3 is the local commit
+    /// being replayed; stage 1, the common ancestor, can be absent.
+    fn resolve_pin_conflict(&self, file: &str) -> bool {
+        let show = |stage: char| {
+            self.git(&["show", &format!(":{stage}:{file}")])
+                .filter(|r| r.ok)
+                .map(|r| r.stdout)
+        };
+        let base = show('1');
+        let (Some(remote), Some(local)) = (show('2'), show('3')) else {
+            return false;
+        };
+        let Some(merged) = merge_pin(base.as_deref(), &remote, &local) else {
+            return false;
+        };
+        if std::fs::write(self.root.join(file), merged).is_err() {
+            return false;
+        }
+        self.git(&["add", "--", file]).is_some_and(|r| r.ok)
     }
 
     /// Commit whatever changed and push it, if there is anywhere to push to.
@@ -259,7 +348,9 @@ impl Sync {
         }
         match self.git(&["add", "-A"]) {
             Some(r) if r.ok => {}
-            Some(r) => return SyncOutcome::Stopped(format!("git add failed: {}", first_line(&r.stderr))),
+            Some(r) => {
+                return SyncOutcome::Stopped(format!("git add failed: {}", first_line(&r.stderr)))
+            }
             None => return SyncOutcome::Idle("git is not on PATH".into()),
         }
 
@@ -274,7 +365,11 @@ impl Sync {
                 Some(r) => {
                     return SyncOutcome::Stopped(format!(
                         "git commit failed: {}",
-                        first_line(&if r.stderr.is_empty() { r.stdout } else { r.stderr })
+                        first_line(&if r.stderr.is_empty() {
+                            r.stdout
+                        } else {
+                            r.stderr
+                        })
                     ))
                 }
                 None => return SyncOutcome::Idle("git is not on PATH".into()),
@@ -282,12 +377,21 @@ impl Sync {
         }
 
         if !self.has_remote() {
-            let what = if staged { "committed" } else { "nothing to commit" };
+            let what = if staged {
+                "committed"
+            } else {
+                "nothing to commit"
+            };
             return SyncOutcome::Idle(format!("{what}; no remote to push to"));
         }
         // Nothing new here and nothing waiting: say so rather than claiming a
         // push that moved no commits.
-        if !staged && self.behind_ahead().map(|(_, ahead)| ahead == 0).unwrap_or(false) {
+        if !staged
+            && self
+                .behind_ahead()
+                .map(|(_, ahead)| ahead == 0)
+                .unwrap_or(false)
+        {
             return SyncOutcome::Idle("nothing to sync".into());
         }
         // A repo that has never been pushed has no upstream to push against.
@@ -430,7 +534,10 @@ mod tests {
 
         let a = Temp::new("machine-a");
         init_repo(a.path());
-        git_in(a.path(), &["remote", "add", "origin", &remote.path().to_string_lossy()]);
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
         write_pin(a.path(), "ideas", "first.md", "# from a\n");
         let out = Sync::new(a.path()).push("pinz: from a");
         assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
@@ -453,7 +560,10 @@ mod tests {
 
         let out = Sync::new(b.path()).pull();
         assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
-        assert!(b.path().join("ideas/second.md").exists(), "the pin should have arrived");
+        assert!(
+            b.path().join("ideas/second.md").exists(),
+            "the pin should have arrived"
+        );
     }
 
     #[test]
@@ -493,7 +603,10 @@ mod tests {
         assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
         let a = Temp::new("status-a");
         init_repo(a.path());
-        git_in(a.path(), &["remote", "add", "origin", &remote.path().to_string_lossy()]);
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
         write_pin(a.path(), "ideas", "a.md", "# a\n");
         Sync::new(a.path()).push("pinz: first");
 
@@ -532,13 +645,139 @@ mod tests {
         assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
         let a = Temp::new("uptodate");
         init_repo(a.path());
-        git_in(a.path(), &["remote", "add", "origin", &remote.path().to_string_lossy()]);
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
         write_pin(a.path(), "ideas", "a.md", "# a\n");
-        assert!(matches!(Sync::new(a.path()).push("first"), SyncOutcome::Done(_)));
+        assert!(matches!(
+            Sync::new(a.path()).push("first"),
+            SyncOutcome::Done(_)
+        ));
 
         let out = Sync::new(a.path()).push("second");
         assert!(matches!(out, SyncOutcome::Idle(_)), "got {out:?}");
         assert_eq!(out.message(), "nothing to sync");
+    }
+
+    /// The clone-and-configure half of a two-machine setup, shared by the
+    /// conflict tests.
+    fn clone_repo(remote: &Path, into: &Path) {
+        assert!(Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(remote)
+            .arg(into)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git_in(into, &["config", "user.name", "pinz test"]);
+        git_in(into, &["config", "user.email", "pinz@test.local"]);
+    }
+
+    /// The 2026-08-07 incident, in miniature: both machines restacked the same
+    /// pin (a same-line git conflict on `z:`), machine A also recolored it and
+    /// machine B rewrote its body. None of that is a judgement call, so the
+    /// pull merges all of it instead of stopping.
+    #[test]
+    fn a_move_on_one_machine_and_an_edit_on_the_other_sync_cleanly() {
+        let remote = Temp::new("automerge-remote");
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new("automerge-a");
+        init_repo(a.path());
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        let original = "---\nx: 10\ny: 20\nz: 5\ncolor: green\n---\n# Keeper\n\nold todo\n";
+        write_pin(a.path(), "ideas", "keeper.md", original);
+        Sync::new(a.path()).push("pinz: original");
+
+        let b = Temp::new("automerge-b");
+        clone_repo(remote.path(), b.path());
+
+        let restacked = original
+            .replace("z: 5", "z: 6")
+            .replace("color: green", "color: blue");
+        write_pin(a.path(), "ideas", "keeper.md", &restacked);
+        Sync::new(a.path()).push("pinz: restacked and recolored");
+        let edited = original
+            .replace("z: 5", "z: 7")
+            .replace("old todo", "go with Keeper Commander");
+        write_pin(b.path(), "ideas", "keeper.md", &edited);
+        Sync::new(b.path()).push("pinz: edited"); // commits, push is rejected
+
+        let out = Sync::new(b.path()).pull();
+        assert!(
+            matches!(out, SyncOutcome::Done(_)),
+            "should auto-merge, got {out:?}"
+        );
+
+        let merged = fs::read_to_string(b.path().join("ideas/keeper.md")).unwrap();
+        assert!(
+            merged.contains("go with Keeper Commander"),
+            "local body kept:\n{merged}"
+        );
+        assert!(
+            merged.contains("z: 7"),
+            "the restack tie goes to local:\n{merged}"
+        );
+        assert!(
+            merged.contains("color: blue"),
+            "remote recolor kept:\n{merged}"
+        );
+
+        // The rebase finished for real: nothing is in progress and the merged
+        // result pushes.
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(b.path())
+            .args(["status", "--porcelain=v2", "--branch"])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(!status.contains("rebase"), "left mid-rebase:\n{status}");
+        let pushed = Sync::new(b.path()).push("pinz: after");
+        assert!(matches!(pushed, SyncOutcome::Done(_)), "got {pushed:?}");
+    }
+
+    /// A delete against an edit is a judgement call, so the guardrail holds:
+    /// stop, leave the repo exactly as it was.
+    #[test]
+    fn a_delete_against_an_edit_still_stops() {
+        let remote = Temp::new("delconflict-remote");
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new("delconflict-a");
+        init_repo(a.path());
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        write_pin(
+            a.path(),
+            "ideas",
+            "doomed.md",
+            "---\nx: 0\ny: 0\nz: 1\ncolor: yellow\n---\n# t\n\nbody\n",
+        );
+        Sync::new(a.path()).push("pinz: original");
+
+        let b = Temp::new("delconflict-b");
+        clone_repo(remote.path(), b.path());
+
+        fs::remove_file(a.path().join("ideas/doomed.md")).unwrap();
+        Sync::new(a.path()).push("pinz: deleted");
+        write_pin(
+            b.path(),
+            "ideas",
+            "doomed.md",
+            "---\nx: 0\ny: 0\nz: 1\ncolor: yellow\n---\n# t\n\nedited\n",
+        );
+        Sync::new(b.path()).push("pinz: edited");
+
+        let out = Sync::new(b.path()).pull();
+        assert!(out.is_stopped(), "delete vs edit must stop, got {out:?}");
+        let kept = fs::read_to_string(b.path().join("ideas/doomed.md")).unwrap();
+        assert!(kept.contains("edited"), "local work must survive the stop");
     }
 
     #[test]
@@ -548,7 +787,10 @@ mod tests {
 
         let a = Temp::new("conflict-a");
         init_repo(a.path());
-        git_in(a.path(), &["remote", "add", "origin", &remote.path().to_string_lossy()]);
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
         write_pin(a.path(), "ideas", "shared.md", "# original\n");
         Sync::new(a.path()).push("pinz: original");
 
