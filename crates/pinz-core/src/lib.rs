@@ -9,6 +9,7 @@
 
 pub mod file_store;
 pub mod geometry;
+pub mod merge;
 pub mod model;
 pub mod store;
 pub mod sync;
