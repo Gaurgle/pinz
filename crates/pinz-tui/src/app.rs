@@ -6,7 +6,7 @@
 //! drag, hit-test - goes through [`View`], the projection spine, so what you
 //! click is exactly what the math says is under the cursor.
 
-use pinz_core::{Board, Camera, Color, NOTE_H, NOTE_W, Note, WorldPoint, ZoomLevel};
+use pinz_core::{Board, Camera, Color, Note, WorldPoint, ZoomLevel, NOTE_H, NOTE_W};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };

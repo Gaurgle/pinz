@@ -19,7 +19,10 @@ pub fn copy(out: &mut impl Write, text: &str) -> io::Result<()> {
     let Some(seq) = osc52(text) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("too much text to copy ({} bytes, limit {MAX_BYTES})", text.len()),
+            format!(
+                "too much text to copy ({} bytes, limit {MAX_BYTES})",
+                text.len()
+            ),
         ));
     };
     out.write_all(seq.as_bytes())?;
@@ -43,8 +46,7 @@ fn osc52(text: &str) -> Option<String> {
 
 /// Base64 per RFC 4648: the standard alphabet, padded with `=`.
 fn base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         // Pack the chunk into the low 24 bits, then read it back out six bits
@@ -96,7 +98,10 @@ mod tests {
     #[test]
     fn osc52_is_never_wrapped_for_tmux() {
         let seq = osc52("foo").unwrap();
-        assert!(!seq.contains("\x1bPtmux;"), "no passthrough wrapper: {seq:?}");
+        assert!(
+            !seq.contains("\x1bPtmux;"),
+            "no passthrough wrapper: {seq:?}"
+        );
         assert!(!seq.contains("\x1b\x1b"), "no doubled escape: {seq:?}");
     }
 
@@ -104,7 +109,10 @@ mod tests {
     fn osc52_refuses_a_payload_past_the_cap() {
         let big = "x".repeat(MAX_BYTES + 1);
         assert!(osc52(&big).is_none());
-        assert!(osc52(&"x".repeat(MAX_BYTES)).is_some(), "the cap itself is allowed");
+        assert!(
+            osc52(&"x".repeat(MAX_BYTES)).is_some(),
+            "the cap itself is allowed"
+        );
     }
 
     #[test]

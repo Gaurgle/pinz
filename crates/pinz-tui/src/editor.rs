@@ -52,7 +52,12 @@ impl TextEditor {
         }
         let row = lines.len() - 1;
         let col = char_len(&lines[row]);
-        Self { lines, row, col, anchor: None }
+        Self {
+            lines,
+            row,
+            col,
+            anchor: None,
+        }
     }
 
     /// The buffer as a single string, lines joined by `\n`.
@@ -65,7 +70,10 @@ impl TextEditor {
     }
 
     pub fn cursor(&self) -> Cursor {
-        Cursor { row: self.row, col: self.col }
+        Cursor {
+            row: self.row,
+            col: self.col,
+        }
     }
 
     // ---- selection ----
@@ -575,7 +583,11 @@ mod tests {
         e.step(Motion::Up, true); // anchor (1,1), cursor (0,1)
         assert_eq!(e.selected_text().as_deref(), Some("b\nc"));
         assert!(e.delete_selection());
-        assert_eq!(e.text(), "ad", "the head of line 0 keeps the tail of line 1");
+        assert_eq!(
+            e.text(),
+            "ad",
+            "the head of line 0 keeps the tail of line 1"
+        );
         assert_eq!(e.cursor(), Cursor { row: 0, col: 1 });
     }
 

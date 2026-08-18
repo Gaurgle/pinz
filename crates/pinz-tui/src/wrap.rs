@@ -36,7 +36,11 @@ pub fn wrap(logical: &[String], width: usize) -> Wrapped {
     for (line, text) in logical.iter().enumerate() {
         let chars: Vec<char> = text.chars().collect();
         if chars.is_empty() {
-            rows.push(Row { text: String::new(), line, start: 0 });
+            rows.push(Row {
+                text: String::new(),
+                line,
+                start: 0,
+            });
             continue;
         }
         let mut start = 0;
@@ -52,14 +56,22 @@ pub fn wrap(logical: &[String], width: usize) -> Wrapped {
                     _ => hard_end,
                 }
             };
-            rows.push(Row { text: chars[start..end].iter().collect(), line, start });
+            rows.push(Row {
+                text: chars[start..end].iter().collect(),
+                line,
+                start,
+            });
             start = end;
         }
     }
 
     // A caret needs somewhere to sit even when there is nothing to show.
     if rows.is_empty() {
-        rows.push(Row { text: String::new(), line: 0, start: 0 });
+        rows.push(Row {
+            text: String::new(),
+            line: 0,
+            start: 0,
+        });
     }
     Wrapped { rows }
 }
@@ -98,7 +110,10 @@ impl Wrapped {
     /// end of the last row.
     pub fn locate(&self, vrow: usize, vcol: usize) -> Cursor {
         let row = &self.rows[vrow.min(self.rows.len() - 1)];
-        Cursor { row: row.line, col: row.start + vcol.min(row.text.chars().count()) }
+        Cursor {
+            row: row.line,
+            col: row.start + vcol.min(row.text.chars().count()),
+        }
     }
 }
 
