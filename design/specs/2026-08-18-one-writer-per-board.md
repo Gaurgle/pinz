@@ -1,7 +1,6 @@
 # One writer per board: later instances open read-only
 
-Date: 2026-08-18. Status: designed, not built. Andreas's idea, written up here
-so it can be built as its own change.
+Date: 2026-08-18. Status: **built** the same day. Andreas's idea.
 
 ## The hazard
 

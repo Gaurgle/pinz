@@ -254,6 +254,12 @@ goes to the machine you are sitting at. Only when both machines changed a pin's
 tell you - in the footer if the board is open, on the terminal otherwise.
 Resolving that is a human's call, not a corkboard's.
 
+Only one pinz may write a board at a time. The first instance takes a lock and
+works normally; open a second one on the same machine and it comes up fully
+readable but read-only, saying so in the footer, so two windows can never
+silently overwrite each other's edits. A lock left behind by a crash is taken
+over automatically.
+
 Pins are deliberately separate from your notez2 notes. A pin that turns out to
 matter is meant to graduate into a real note later; nothing here reads or writes
 a notez2 workspace.
