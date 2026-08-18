@@ -96,7 +96,8 @@ impl FileStore {
     /// and machines.
     fn board_dirs(&self) -> Result<Vec<PathBuf>> {
         let mut dirs = Vec::new();
-        let entries = fs::read_dir(&self.root).map_err(|e| backend("reading the pinz directory", e))?;
+        let entries =
+            fs::read_dir(&self.root).map_err(|e| backend("reading the pinz directory", e))?;
         for entry in entries {
             let entry = entry.map_err(|e| backend("reading the pinz directory", e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -300,7 +301,11 @@ fn split_title_and_body(text: &str) -> (String, String) {
         None => (text, ""),
     };
     let title = first.strip_prefix("# ").unwrap_or(first).to_string();
-    let body = rest.strip_prefix('\n').unwrap_or(rest).trim_end().to_string();
+    let body = rest
+        .strip_prefix('\n')
+        .unwrap_or(rest)
+        .trim_end()
+        .to_string();
     (title, body)
 }
 
@@ -404,7 +409,11 @@ mod tests {
 
     #[test]
     fn a_pin_round_trips_through_its_file() {
-        let n = note(1, "buy a new lamp", "The one by the desk flickers.\n\nSecond para.");
+        let n = note(
+            1,
+            "buy a new lamp",
+            "The one by the desk flickers.\n\nSecond para.",
+        );
         let parsed = parse_pin(&render_pin(&n), 1);
         assert_eq!(parsed, n);
     }
@@ -484,7 +493,10 @@ mod tests {
         let before = fs::metadata(file).unwrap().modified().unwrap();
         store.save(&boards).unwrap();
         let after = fs::metadata(file).unwrap().modified().unwrap();
-        assert_eq!(before, after, "an identical save should not rewrite the file");
+        assert_eq!(
+            before, after,
+            "an identical save should not rewrite the file"
+        );
     }
 
     #[test]

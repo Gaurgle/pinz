@@ -62,7 +62,9 @@ impl MemoryStore {
     /// from content baked into the program.
     #[cfg(any(test, feature = "fixtures"))]
     pub fn seeded() -> Self {
-        Self { boards: seed_boards() }
+        Self {
+            boards: seed_boards(),
+        }
     }
 }
 

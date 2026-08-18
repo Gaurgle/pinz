@@ -24,10 +24,9 @@ use std::path::{Path, PathBuf};
 
 use app::App;
 use pinz_core::{
-    Board, Color, FileStore, Note, Store, Sync, SyncOutcome,
     lock::{BoardLock, Ownership},
+    Board, Color, FileStore, Note, Store, Sync, SyncOutcome,
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
@@ -35,8 +34,9 @@ use ratatui::crossterm::{
         Event, KeyEventKind,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ratatui::Terminal;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -780,7 +780,7 @@ mod tests {
 
         let before = app.revision();
         app.on_key(press(KeyCode::Char('n'))); // new pin, opens the editor
-        // ctrl+u clears the placeholder title, as it would in the app
+                                               // ctrl+u clears the placeholder title, as it would in the app
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         for c in "buy milk".chars() {
             app.on_key(press(KeyCode::Char(c)));

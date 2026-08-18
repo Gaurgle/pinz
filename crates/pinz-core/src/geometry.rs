@@ -67,7 +67,10 @@ impl ZoomLevel {
 
     /// Position in `ALL`, i.e. 0 for `Cluster` up to 3 for `Document`.
     pub fn index(self) -> usize {
-        Self::ALL.iter().position(|&z| z == self).expect("every variant is in ALL")
+        Self::ALL
+            .iter()
+            .position(|&z| z == self)
+            .expect("every variant is in ALL")
     }
 
     fn from_index(i: isize) -> ZoomLevel {
@@ -108,7 +111,10 @@ pub struct Projection {
 
 impl Projection {
     pub fn new(camera: Camera, cell_aspect: f64) -> Self {
-        Self { camera, cell_aspect }
+        Self {
+            camera,
+            cell_aspect,
+        }
     }
 
     fn scale_x(&self) -> f64 {
@@ -154,9 +160,18 @@ mod tests {
     #[test]
     fn projection_round_trips_across_cameras_and_media() {
         let cameras = [
-            Camera { origin: WorldPoint { x: 0.0, y: 0.0 }, zoom: ZoomLevel::Document },
-            Camera { origin: WorldPoint { x: 137.5, y: -42.0 }, zoom: ZoomLevel::Titles },
-            Camera { origin: WorldPoint { x: 900.0, y: 610.0 }, zoom: ZoomLevel::Cluster },
+            Camera {
+                origin: WorldPoint { x: 0.0, y: 0.0 },
+                zoom: ZoomLevel::Document,
+            },
+            Camera {
+                origin: WorldPoint { x: 137.5, y: -42.0 },
+                zoom: ZoomLevel::Titles,
+            },
+            Camera {
+                origin: WorldPoint { x: 900.0, y: 610.0 },
+                zoom: ZoomLevel::Cluster,
+            },
         ];
         let w = WorldPoint { x: 321.0, y: 654.0 };
         for cam in cameras {

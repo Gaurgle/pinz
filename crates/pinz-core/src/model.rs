@@ -48,7 +48,6 @@ impl Color {
             Color::Red => "red",
         }
     }
-
 }
 
 /// Returned when a string doesn't name one of the eight note colors.
@@ -105,22 +104,25 @@ pub struct Note {
 impl Note {
     /// Top-left corner as a point.
     pub fn position(&self) -> WorldPoint {
-        WorldPoint { x: self.x, y: self.y }
+        WorldPoint {
+            x: self.x,
+            y: self.y,
+        }
     }
 
     /// Center point, handy for "zoom in and focus this note".
     pub fn center(&self) -> WorldPoint {
-        WorldPoint { x: self.x + NOTE_W / 2.0, y: self.y + NOTE_H / 2.0 }
+        WorldPoint {
+            x: self.x + NOTE_W / 2.0,
+            y: self.y + NOTE_H / 2.0,
+        }
     }
 
     /// Whether `p` (world space) lands on this note. The basis of hit-testing
     /// once a click has been un-projected to world coordinates. Left/top edges
     /// are inclusive, right/bottom exclusive.
     pub fn contains(&self, p: WorldPoint) -> bool {
-        p.x >= self.x
-            && p.x < self.x + NOTE_W
-            && p.y >= self.y
-            && p.y < self.y + NOTE_H
+        p.x >= self.x && p.x < self.x + NOTE_W && p.y >= self.y && p.y < self.y + NOTE_H
     }
 }
 
@@ -133,13 +135,19 @@ pub struct Board {
 
 impl Board {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), notes: Vec::new() }
+        Self {
+            name: name.into(),
+            notes: Vec::new(),
+        }
     }
 
     /// The topmost note under a world-space point, respecting stack order.
     /// This is what a click resolves to.
     pub fn note_at(&self, p: WorldPoint) -> Option<&Note> {
-        self.notes.iter().filter(|n| n.contains(p)).max_by_key(|n| n.z)
+        self.notes
+            .iter()
+            .filter(|n| n.contains(p))
+            .max_by_key(|n| n.z)
     }
 }
 
@@ -148,15 +156,35 @@ mod tests {
     use super::*;
 
     fn note_at(x: f64, y: f64, z: u32, title: &str) -> Note {
-        Note { id: 1, title: title.into(), body: String::new(), x, y, z, color: Color::Yellow }
+        Note {
+            id: 1,
+            title: title.into(),
+            body: String::new(),
+            x,
+            y,
+            z,
+            color: Color::Yellow,
+        }
     }
 
     #[test]
     fn note_contains_respects_its_edges() {
         let n = note_at(10.0, 20.0, 0, "t");
-        assert!(n.contains(WorldPoint { x: 10.0, y: 20.0 }), "top-left is inclusive");
-        assert!(n.contains(WorldPoint { x: 10.0 + NOTE_W - 0.1, y: 20.0 }));
-        assert!(!n.contains(WorldPoint { x: 10.0 + NOTE_W, y: 20.0 }), "right edge is exclusive");
+        assert!(
+            n.contains(WorldPoint { x: 10.0, y: 20.0 }),
+            "top-left is inclusive"
+        );
+        assert!(n.contains(WorldPoint {
+            x: 10.0 + NOTE_W - 0.1,
+            y: 20.0
+        }));
+        assert!(
+            !n.contains(WorldPoint {
+                x: 10.0 + NOTE_W,
+                y: 20.0
+            }),
+            "right edge is exclusive"
+        );
         assert!(!n.contains(WorldPoint { x: 9.0, y: 20.0 }));
     }
 
@@ -165,7 +193,10 @@ mod tests {
         let mut b = Board::new("t");
         b.notes.push(note_at(0.0, 0.0, 0, "under"));
         b.notes.push(note_at(0.0, 0.0, 5, "over"));
-        assert_eq!(b.note_at(WorldPoint { x: 1.0, y: 1.0 }).unwrap().title, "over");
+        assert_eq!(
+            b.note_at(WorldPoint { x: 1.0, y: 1.0 }).unwrap().title,
+            "over"
+        );
         assert!(b.note_at(WorldPoint { x: 9999.0, y: 0.0 }).is_none());
     }
 

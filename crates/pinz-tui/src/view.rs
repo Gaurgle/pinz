@@ -219,7 +219,10 @@ mod tests {
         let v = view(ZoomLevel::Document);
         let on_screen = v.note_cells(WorldPoint { x: 400.0, y: 200.0 });
         // Same note, dragged well past the left edge of the viewport.
-        let hanging = v.note_cells(WorldPoint { x: -120.0, y: 200.0 });
+        let hanging = v.note_cells(WorldPoint {
+            x: -120.0,
+            y: 200.0,
+        });
 
         assert!(hanging.x < 0, "expected a negative origin, got {hanging:?}");
         assert_eq!(
