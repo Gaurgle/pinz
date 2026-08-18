@@ -239,6 +239,17 @@ fn git_command(command: Command) -> io::Result<()> {
     let wants_push = matches!(command, Command::Sync | Command::Push);
 
     if wants_pull {
+        // Checkpoint first: git will not pull over uncommitted edits to a pin
+        // the other machine also changed, and pinz commits those on quit
+        // anyway, so doing it here costs nothing and unblocks the pull.
+        let committed = sync.commit("pinz: update pins");
+        if committed.is_stopped() {
+            report("commit", &committed);
+            return Ok(());
+        }
+        if matches!(committed, SyncOutcome::Done(_)) {
+            report("commit", &committed);
+        }
         let pulled = sync.pull();
         report("pull", &pulled);
         if pulled.is_stopped() {
@@ -321,6 +332,9 @@ fn run_app(opts: Options) -> io::Result<()> {
     let sync = opts.sync.then(|| Sync::new(&root));
     let mut sync_stop: Option<String> = None;
     if let Some(sync) = &sync {
+        // Pins left uncommitted by a crash, an offline quit, or a --no-sync run
+        // would otherwise block the pull outright. Checkpoint them first.
+        sync.commit("pinz: update pins");
         let pulled = sync.pull();
         if pulled.is_stopped() {
             sync_stop = Some(pulled.message().to_string());
