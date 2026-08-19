@@ -98,6 +98,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("tab / shift+tab", "next, previous"),
             ("1 - 9", "jump to a world"),
             ("w / +", "new world"),
+            ("W", "delete this world"),
             ("drag onto a tab", "send a pin there"),
         ],
     ),
@@ -1294,7 +1295,8 @@ mod tests {
         for wanted in [
             "board", "pins", "worlds", "editing", // one per group
             "ctrl+r", "1 - 9", "ctrl+a", "t / T", "? / F1", // one binding each
-            "shift + h j k l", // and the newest, which is easiest to forget
+            "shift + h j k l",
+            "delete this world", // and the newest, which is easiest to forget
             "any key closes",
         ] {
             assert!(

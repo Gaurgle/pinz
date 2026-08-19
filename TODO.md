@@ -21,13 +21,9 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 
 ## Boards and pins
 
-- **Delete a world from inside the app.** Designed 2026-08-19 and not built:
-  an empty world is deleted outright, a world with pins on it needs its name
-  typed to confirm. The part that needs thought is storage - `FileStore::save`
-  only ever writes the boards it is handed and deletes stale *pin* files; it
-  never removes a board directory, and an empty board carries a `.gitkeep` so
-  git does not lose the tab. Dropping a world from the in-memory list is
-  therefore not enough: it reappears on the next load.
+- ~~Delete a world from inside the app.~~ Built 2026-08-19; see
+  `design/specs/2026-08-19-delete-a-world.md`. `W` deletes the world you are on,
+  and `Store` grew a `delete_board` for it.
 - Rename a board from inside the app. Creating one is done (`w`, or the `+` in
   the tab strip); renaming still means touching `~/pinz-board` by hand.
 - Move a pin to another board *from the keyboard*. Dragging it onto the target
