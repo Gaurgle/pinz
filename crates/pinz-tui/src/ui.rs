@@ -61,8 +61,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 const HELP_COL: u16 = 34;
 
 /// Where the groups split between the two columns. One column would run to
-/// about 35 rows, which does not fit an 80x24 terminal.
-const HELP_SPLIT: usize = 3;
+/// about 35 rows, which does not fit an 80x24 terminal. Chosen to balance the
+/// two, so the panel is only as tall as its longer half.
+const HELP_SPLIT: usize = 2;
 
 /// Every binding pinz has, and the only place they are written down - the
 /// footer carries news, not a key list. Grouped by what you are doing rather
@@ -86,6 +87,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("c / C", "color, backwards"),
             ("d / x / del", "delete it"),
             ("drag", "move it"),
+            ("shift + ← ↑ → ↓", "step between pins"),
+            ("shift + h j k l", "the same"),
             ("u / ctrl+r", "undo, redo"),
         ],
     ),
@@ -356,7 +359,7 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     notes.sort_by_key(|n| n.z);
 
     match app.zoom() {
-        ZoomLevel::Cluster => draw_cluster(frame, &view, &notes, theme),
+        ZoomLevel::Cluster => draw_cluster(frame, &view, &notes, app.selected(), theme),
         lod => {
             for note in &notes {
                 let cells = view.note_cells(note.position());
@@ -413,11 +416,27 @@ fn draw_grid(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 /// Zoomed-out path (cluster level): each note is a solid colored block, no text -
 /// the whole-board overview.
-fn draw_cluster(frame: &mut Frame, view: &View, notes: &[&Note], theme: &Theme) {
+fn draw_cluster(
+    frame: &mut Frame,
+    view: &View,
+    notes: &[&Note],
+    selected: Option<u64>,
+    theme: &Theme,
+) {
     for note in notes {
         if let Some(rect) = view.note_rect(note.position()) {
             let color = theme.note(note.color);
             frame.render_widget(Block::new().style(Style::new().bg(color)), rect);
+            // The selected pin keeps its color and takes a mark in the middle.
+            // There is no text at this zoom and often only a cell or two of
+            // block, so the accent as a *background* would say which pin is
+            // selected by hiding the one thing the block does tell you.
+            if selected == Some(note.id) {
+                let (cx, cy) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+                if let Some(cell) = frame.buffer_mut().cell_mut((cx, cy)) {
+                    cell.set_symbol("●").set_fg(theme.accent);
+                }
+            }
         }
     }
 }
@@ -1237,6 +1256,30 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_pin_is_marked_at_cluster_zoom() {
+        // Cluster draws solid blocks and no text at all, so without a mark the
+        // keyboard selection is invisible exactly where it matters most.
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap(); // gives it a viewport
+
+        for _ in 0..4 {
+            app.on_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.zoom(), ZoomLevel::Cluster, "expected the far zoom out");
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(app.selected().is_some(), "a pin should be selected");
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Board rows only: the header's zoom dots are the same glyph.
+        let board: String = (2..buf.area.height).map(|y| row_text(&buf, y)).collect();
+        assert!(board.contains('●'), "the selected pin is unmarked:\n{board}");
+    }
+
+    #[test]
     fn the_key_list_covers_every_group() {
         // The footer stopped teaching keys, so this panel is the only place
         // they are written down. Missing one means it is bound and unfindable.
@@ -1251,6 +1294,7 @@ mod tests {
         for wanted in [
             "board", "pins", "worlds", "editing", // one per group
             "ctrl+r", "1 - 9", "ctrl+a", "t / T", "? / F1", // one binding each
+            "shift + h j k l", // and the newest, which is easiest to forget
             "any key closes",
         ] {
             assert!(

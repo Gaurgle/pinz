@@ -143,12 +143,13 @@ carries news instead: what a drag is about to do, what was copied, why a board
 is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
-detail, **drag a note** to move it, **drag the board** to pan (arrow keys too), `Tab` or
-`1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab strip for a
-new world (it stays out of your way: the tab appears, you do not move to it, and
-nine is the limit because `1`-`9` are how you get there), `n` for a new note,
-`e` or `enter` to edit the selected note (first line is the title, the rest the
-body; `enter` adds a line,
+detail, **drag a note** to move it, **drag the board** to pan (arrow keys too),
+`Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
+strip for a new world (it stays out of your way: the tab appears, you do not
+move to it, and nine is the limit because `1`-`9` are how you get there), `n`
+for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to step the
+selection between pins, `e` or `enter` to edit the selected note (which zooms in
+and centers it; first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves),
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,

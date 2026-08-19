@@ -161,6 +161,15 @@ enum Drag {
     Text,
 }
 
+/// One step of keyboard selection, in board directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 pub struct App {
     boards: Vec<Board>,
     active: usize,
@@ -538,6 +547,7 @@ impl App {
             Mode::Nav => {}
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('r') if ctrl => self.redo_step(),
             KeyCode::Char('u') => self.undo_step(),
@@ -558,6 +568,17 @@ impl App {
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
+            // Selection before panning: shift means "select" here exactly as it
+            // does inside a note, and hjkl are the same four steps for a hand
+            // already on the home row.
+            KeyCode::Left if shift => self.select_toward(Step::Left),
+            KeyCode::Right if shift => self.select_toward(Step::Right),
+            KeyCode::Up if shift => self.select_toward(Step::Up),
+            KeyCode::Down if shift => self.select_toward(Step::Down),
+            KeyCode::Char('H') => self.select_toward(Step::Left),
+            KeyCode::Char('L') => self.select_toward(Step::Right),
+            KeyCode::Char('K') => self.select_toward(Step::Up),
+            KeyCode::Char('J') => self.select_toward(Step::Down),
             KeyCode::Left => self.pan_cells(-PAN_CELLS, 0.0),
             KeyCode::Right => self.pan_cells(PAN_CELLS, 0.0),
             KeyCode::Up => self.pan_cells(0.0, -PAN_CELLS),
@@ -792,6 +813,144 @@ impl App {
         self.editor = Some(TextEditor::new(&text));
         self.mode = Mode::Edit;
         self.camera.zoom = ZoomLevel::Document;
+        // Centre rather than merely clamp: `e` from a zoomed-out board used to
+        // leave you looking wherever you already were, with the note you just
+        // opened somewhere off to the side.
+        self.center_on_note(id);
+    }
+
+    /// Put one pin in the middle of the viewport.
+    ///
+    /// `clamp_origin` can pull it off-centre for a pin near the edge of the
+    /// board; that is the same pan margin every other camera move obeys, not a
+    /// rule of its own.
+    fn center_on_note(&mut self, id: u64) {
+        let Some((cx, cy)) = self.note_center(id) else {
+            return;
+        };
+        let (sx, sy) = self.view().scale();
+        self.camera.origin = WorldPoint {
+            x: cx - (self.viewport.width as f64 / 2.0) / sx,
+            y: cy - (self.viewport.height as f64 / 2.0) / sy,
+        };
+        self.clamp_origin();
+    }
+
+    fn note_center(&self, id: u64) -> Option<(f64, f64)> {
+        self.active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(center_of)
+    }
+
+    // ---- keyboard selection ----
+
+    /// Move the selection one pin in a direction, and fetch it into view.
+    ///
+    /// With nothing selected the direction is ignored and the pin nearest the
+    /// middle of the screen is taken: the first press should land where you are
+    /// already looking rather than at some edge of the board.
+    fn select_toward(&mut self, step: Step) {
+        let Some(target) = self.step_target(step) else {
+            return;
+        };
+        self.selected = Some(target);
+        self.bring_into_view(target);
+        // At cluster zoom no title is drawn at all, so this is the only thing
+        // that says which pin you just landed on.
+        if let Some(note) = self.active_board().notes.iter().find(|n| n.id == target) {
+            self.status = Some(if note.title.trim().is_empty() {
+                "untitled pin".to_string()
+            } else {
+                note.title.clone()
+            });
+        }
+    }
+
+    /// The pin one step away, if there is one.
+    ///
+    /// Candidates are the pins strictly beyond this one along the axis, scored
+    /// by how far along they are plus twice how far off it - so a pin straight
+    /// ahead beats a nearer one away to the side. There is no wrap-around: a
+    /// selection that leaps to the opposite edge costs more than stopping does.
+    fn step_target(&self, step: Step) -> Option<u64> {
+        let notes = &self.active_board().notes;
+        let Some(current) = self.selected.and_then(|id| notes.iter().find(|n| n.id == id)) else {
+            return self.nearest_to_view_center();
+        };
+        let (cx, cy) = center_of(current);
+        notes
+            .iter()
+            .filter(|n| n.id != current.id)
+            .filter_map(|n| {
+                let (nx, ny) = center_of(n);
+                let (along, off) = match step {
+                    Step::Left => (cx - nx, ny - cy),
+                    Step::Right => (nx - cx, ny - cy),
+                    Step::Up => (cy - ny, nx - cx),
+                    Step::Down => (ny - cy, nx - cx),
+                };
+                if along > 0.0 {
+                    Some((along + 2.0 * off.abs(), n.id))
+                } else {
+                    None
+                }
+            })
+            // Ties broken by id, so the same board always steps the same way.
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            .map(|(_, id)| id)
+    }
+
+    fn nearest_to_view_center(&self) -> Option<u64> {
+        let (sx, sy) = self.view().scale();
+        let mid = (
+            self.camera.origin.x + (self.viewport.width as f64 / 2.0) / sx,
+            self.camera.origin.y + (self.viewport.height as f64 / 2.0) / sy,
+        );
+        self.active_board()
+            .notes
+            .iter()
+            .map(|n| {
+                let (x, y) = center_of(n);
+                ((x - mid.0).hypot(y - mid.1), n.id)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            .map(|(_, id)| id)
+    }
+
+    /// Scroll the least that puts a pin fully on screen, and not at all if it
+    /// already is. Stepping between pins you can see should leave the board
+    /// where it is; only one off the edge is worth moving the board for.
+    fn bring_into_view(&mut self, id: u64) {
+        let Some((x, y)) = self
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| (n.x, n.y))
+        else {
+            return;
+        };
+        let (sx, sy) = self.view().scale();
+        let view_w = self.viewport.width as f64 / sx;
+        let view_h = self.viewport.height as f64 / sy;
+        let mut origin = self.camera.origin;
+        // Far edge first, then the near one, so a pin bigger than the viewport
+        // settles showing its top-left rather than its bottom-right.
+        if x + NOTE_W > origin.x + view_w {
+            origin.x = x + NOTE_W - view_w;
+        }
+        if x < origin.x {
+            origin.x = x;
+        }
+        if y + NOTE_H > origin.y + view_h {
+            origin.y = y + NOTE_H - view_h;
+        }
+        if y < origin.y {
+            origin.y = y;
+        }
+        self.camera.origin = origin;
         self.clamp_origin();
     }
 
@@ -1394,6 +1553,12 @@ impl App {
     }
 }
 
+/// A pin's middle. Direction and distance between pins are measured from here,
+/// not from the top-left corner, so a step lands where it looks like it should.
+fn center_of(note: &Note) -> (f64, f64) {
+    (note.x + NOTE_W / 2.0, note.y + NOTE_H / 2.0)
+}
+
 /// Decimal digits in `n`, for laying out a tab's note count.
 fn digits(n: usize) -> u16 {
     let mut n = n / 10;
@@ -1436,6 +1601,158 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    /// Pins at known world positions, for the spatial tests. A cross around the
+    /// origin plus one decoy far to the right and well below, which is nearer
+    /// on the x axis than the pin due right but badly off it.
+    const PINS: &[(f64, f64)] = &[
+        (0.0, 0.0),      // 1, the middle
+        (1200.0, 0.0),   // 2, due right
+        (0.0, 900.0),    // 3, due down
+        (-900.0, 0.0),   // 4, due left
+        (0.0, -900.0),   // 5, due up
+        (1800.0, 700.0), // 6, the decoy
+    ];
+
+    fn app_with_pins(positions: &[(f64, f64)]) -> App {
+        let mut board = Board::new("spatial");
+        for (i, (x, y)) in positions.iter().enumerate() {
+            board.notes.push(Note {
+                id: i as u64 + 1,
+                title: format!("pin {}", i + 1),
+                body: String::new(),
+                x: *x,
+                y: *y,
+                z: i as u32 + 1,
+                color: Color::Yellow,
+            });
+        }
+        let mut a = App::new(vec![board]);
+        a.set_viewport(VIEWPORT);
+        a
+    }
+
+    const VIEWPORT: Rect = Rect {
+        x: 0,
+        y: 2,
+        width: 100,
+        height: 30,
+    };
+
+    /// Where a pin's centre lands on screen, in cells from the viewport corner.
+    fn pin_cell(a: &App, id: u64) -> (f64, f64) {
+        let n = a
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("pin");
+        View::new(a.camera(), VIEWPORT).cell_of(WorldPoint {
+            x: n.x + NOTE_W / 2.0,
+            y: n.y + NOTE_H / 2.0,
+        })
+    }
+
+    fn shift(code: KeyCode) -> KeyEvent {
+        chord(code, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn the_first_step_takes_the_pin_nearest_the_view() {
+        let mut a = app_with_pins(PINS);
+        assert!(a.selected().is_none());
+        a.on_key(shift(KeyCode::Right));
+        assert_eq!(a.selected(), Some(1), "the middle pin is the closest one");
+    }
+
+    #[test]
+    fn shift_arrows_step_to_the_nearest_pin_that_way() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // onto pin 1
+        for (code, want, why) in [
+            (KeyCode::Right, 2, "the decoy is nearer on x but far off the axis"),
+            (KeyCode::Left, 1, "and back"),
+            (KeyCode::Down, 3, "straight down beats the decoy"),
+            (KeyCode::Up, 1, "and back again"),
+            (KeyCode::Left, 4, "due left"),
+            (KeyCode::Right, 1, "returns"),
+            (KeyCode::Up, 5, "due up"),
+        ] {
+            a.on_key(shift(code));
+            assert_eq!(a.selected(), Some(want), "{why}");
+        }
+    }
+
+    #[test]
+    fn shift_hjkl_steps_the_same_way_as_the_arrows() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Char('L'))); // onto pin 1
+        a.on_key(shift(KeyCode::Char('L')));
+        assert_eq!(a.selected(), Some(2), "l goes right");
+        a.on_key(shift(KeyCode::Char('H')));
+        assert_eq!(a.selected(), Some(1), "h goes left");
+        a.on_key(shift(KeyCode::Char('J')));
+        assert_eq!(a.selected(), Some(3), "j goes down");
+        a.on_key(shift(KeyCode::Char('K')));
+        assert_eq!(a.selected(), Some(1), "k goes up");
+    }
+
+    #[test]
+    fn stepping_past_the_last_pin_stays_put() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1
+        a.on_key(shift(KeyCode::Left)); // pin 4, the leftmost
+        assert_eq!(a.selected(), Some(4));
+        a.on_key(shift(KeyCode::Left));
+        assert_eq!(a.selected(), Some(4), "no wrap-around off the edge");
+    }
+
+    #[test]
+    fn the_camera_moves_only_for_a_pin_it_cannot_show() {
+        let mut a = app_with_pins(PINS);
+        let still = a.camera().origin;
+        a.on_key(shift(KeyCode::Right)); // pin 1, already on screen
+        assert_eq!(
+            a.camera().origin,
+            still,
+            "a visible pin must not lurch the board"
+        );
+
+        a.on_key(shift(KeyCode::Right)); // pin 2, off to the right
+        assert_ne!(a.camera().origin, still, "an off-screen pin must be fetched");
+        let (cx, cy) = pin_cell(&a, 2);
+        assert!(
+            cx > 0.0 && cx < VIEWPORT.width as f64,
+            "pin 2 still off screen at {cx}"
+        );
+        assert!(cy > 0.0 && cy < VIEWPORT.height as f64, "off vertically: {cy}");
+    }
+
+    #[test]
+    fn stepping_onto_a_pin_names_it() {
+        // At cluster zoom no title is drawn, so this is the only thing telling
+        // you which pin you just landed on.
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right));
+        a.on_key(shift(KeyCode::Right));
+        assert!(
+            a.status().is_some_and(|s| s.contains("pin 2")),
+            "got {:?}",
+            a.status()
+        );
+    }
+
+    #[test]
+    fn e_centres_the_pin_it_opens() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1
+        a.on_key(key(KeyCode::Char('e')));
+        assert_eq!(a.zoom(), ZoomLevel::Document);
+        let (cx, cy) = pin_cell(&a, 1);
+        let (want_x, want_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
+        assert!((cx - want_x).abs() < 1.0, "off centre horizontally: {cx}");
+        assert!((cy - want_y).abs() < 1.0, "off centre vertically: {cy}");
     }
 
     /// A board list already at the world limit, for testing the cap.
