@@ -28,6 +28,14 @@ const NEW_TAB_WIDTH: u16 = 3;
 /// Longest world name we will take. A world is a directory, so this is about
 /// keeping paths sane rather than anything deeper.
 const BOARD_NAME_MAX: usize = 40;
+
+/// How many worlds you may have.
+///
+/// The number is not arbitrary: `1`-`9` are how you reach a world, so a tenth
+/// could only be got to by tabbing past the others. A limit you can see in the
+/// tab strip beats a world you can only reach the long way round.
+const MAX_WORLDS: usize = 9;
+
 /// How many board states undo remembers. A snapshot is the whole workspace,
 /// which for a corkboard of text notes is tens of kilobytes - less than the
 /// frame pinz already redraws on every keystroke - so this can be generous.
@@ -421,11 +429,16 @@ impl App {
             });
             x += width;
         }
-        out.push(Tab {
-            kind: TabKind::New,
-            x,
-            width: NEW_TAB_WIDTH,
-        });
+        // At the limit the + could only ever refuse, so the strip simply ends
+        // after the ninth world. Both the renderer and hit-testing read this
+        // list, so the button and its click target disappear together.
+        if self.boards.len() < MAX_WORLDS {
+            out.push(Tab {
+                kind: TabKind::New,
+                x,
+                width: NEW_TAB_WIDTH,
+            });
+        }
         out
     }
 
@@ -539,7 +552,7 @@ impl App {
             KeyCode::Char('r') if ctrl => self.redo_step(),
             KeyCode::Char('u') => self.undo_step(),
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.quit(),
             KeyCode::Esc => self.selected = None,
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_at_center(true),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_at_center(false),
@@ -700,7 +713,7 @@ impl App {
         }
         // Nothing to copy. Ctrl-C falls back to its old job; Cmd-C has none.
         if ctrl && !cut {
-            self.should_quit = true;
+            self.quit();
         }
         true
     }
@@ -1003,9 +1016,29 @@ impl App {
         self.mode = Mode::Nav;
     }
 
+    /// Leave, saving whatever is open on the way out.
+    ///
+    /// Every quit key goes through here so none of them can forget the commit.
+    /// In nav there is no editor and this is just a flag; in edit it is the
+    /// difference between keeping the note you were typing and losing it. The
+    /// reason is the one `commit_edit` already gives for Esc: a whole note is
+    /// too much to lose to a single key. Ctrl-C is the only way out of edit
+    /// mode - `q` there is a letter - so without this the exit key was also
+    /// the discard key.
+    fn quit(&mut self) {
+        self.commit_edit();
+        self.should_quit = true;
+    }
+
     /// Open the prompt that names a new world.
     fn begin_new_world(&mut self) {
         if self.refuse_if_read_only() {
+            return;
+        }
+        // Refused here rather than on confirm: being asked for a name and only
+        // then told the world cannot exist is the wrong order to find out.
+        if self.boards.len() >= MAX_WORLDS {
+            self.status = Some(format!("{MAX_WORLDS} worlds is the limit"));
             return;
         }
         self.prompt = Some(Prompt {
@@ -1058,28 +1091,40 @@ impl App {
     /// Act on the prompt's answer. A refusal keeps the prompt open with the
     /// typed text intact and the reason shown - retyping a name because of a
     /// stray slash would be its own small insult.
+    ///
+    /// Creating a world does not switch to it. Naming one is something you do
+    /// *while* working on another board, and being carried off the board you
+    /// were looking at is a worse surprise than having to press its number.
+    /// A name already on a tab is refused for the same reason: it would be the
+    /// one way `w` could still move you.
     fn confirm_prompt(&mut self) {
-        let Some(prompt) = self.prompt.as_mut() else {
+        let Some(prompt) = self.prompt.as_ref() else {
             return;
         };
         let name = prompt.input.trim().to_string();
-        match validate_board_name(&name) {
-            Err(why) => prompt.error = Some(why),
-            Ok(()) => {
-                // An existing world is switched to rather than duplicated: two
-                // directories cannot share a name anyway.
-                match self.boards.iter().position(|b| b.name == name) {
-                    Some(index) => self.switch_world(index),
-                    None => {
-                        self.boards.push(Board::new(name));
-                        self.revision += 1;
-                        self.switch_world(self.boards.len() - 1);
-                    }
-                }
-                self.prompt = None;
-                self.mode = Mode::Nav;
+        let refusal = validate_board_name(&name).err().or_else(|| {
+            // Two directories cannot share a name anyway.
+            self.boards
+                .iter()
+                .any(|b| b.name == name)
+                .then(|| format!("{name} already exists"))
+        });
+        if let Some(why) = refusal {
+            if let Some(prompt) = self.prompt.as_mut() {
+                prompt.error = Some(why);
             }
+            return;
         }
+        self.boards.push(Board::new(name.clone()));
+        self.revision += 1;
+        // Staying put means a growing tab strip is the only sign anything
+        // happened, so say what was made and which key opens it.
+        self.status = Some(format!(
+            "created {name} · press {} to open it",
+            self.boards.len()
+        ));
+        self.prompt = None;
+        self.mode = Mode::Nav;
     }
 
     // ---- mouse ----
@@ -1710,6 +1755,19 @@ mod tests {
         assert!((cy - want_y).abs() < 1.0, "off centre vertically: {cy}");
     }
 
+    /// A board list already at the world limit, for testing the cap.
+    fn filled_to_the_limit() -> App {
+        let mut a = app();
+        for n in a.boards().len()..MAX_WORLDS {
+            a.on_key(key(KeyCode::Char('w')));
+            for c in format!("world{n}").chars() {
+                a.on_key(key(KeyCode::Char(c)));
+            }
+            a.on_key(key(KeyCode::Enter));
+        }
+        a
+    }
+
     fn app() -> App {
         let mut store = MemoryStore::seeded();
         let mut app = App::new(store.load().unwrap());
@@ -1850,6 +1908,22 @@ mod tests {
         let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(note.title, "new notehi");
         assert_eq!(note.body, "");
+    }
+
+    #[test]
+    fn quitting_mid_edit_saves_the_note() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n'))); // edit, editor holds "new note"
+        a.on_key(key(KeyCode::Enter));
+        for c in "body".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL)); // the only way out of edit
+        assert!(a.should_quit());
+        let id = a.selected().unwrap();
+        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note.title, "new note");
+        assert_eq!(note.body, "body", "quitting must not drop the open edit");
     }
 
     #[test]
@@ -2050,9 +2124,13 @@ mod tests {
     }
 
     #[test]
-    fn confirming_the_prompt_creates_the_world_and_switches_to_it() {
+    fn confirming_the_prompt_creates_the_world_without_leaving_this_one() {
         let mut a = app();
-        let before = a.boards().len();
+        // A note, selected, so there is something to be disturbed.
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        let (here, selected, before) = (a.active_index(), a.selected(), a.boards().len());
+
         a.on_key(key(KeyCode::Char('w')));
         for c in "reading".chars() {
             a.on_key(key(KeyCode::Char(c)));
@@ -2061,8 +2139,54 @@ mod tests {
 
         assert_eq!(a.mode(), Mode::Nav);
         assert_eq!(a.boards().len(), before + 1);
-        assert_eq!(a.active_board().name, "reading", "lands on the new world");
-        assert!(a.active_board().notes.is_empty());
+        assert_eq!(a.boards().last().unwrap().name, "reading");
+        assert!(a.boards().last().unwrap().notes.is_empty());
+        assert_eq!(a.active_index(), here, "creating a world must not move you");
+        assert_eq!(a.selected(), selected, "nor drop what you had selected");
+    }
+
+    #[test]
+    fn creating_a_world_says_where_it_went() {
+        // Staying put means the only sign is the tab strip growing, so the
+        // footer names the world and the key that opens it.
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('w')));
+        for c in "reading".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::Enter));
+
+        let status = a.status().unwrap_or_default().to_string();
+        assert!(status.contains("reading"), "got {status:?}");
+        assert!(
+            status.contains('4'),
+            "the tab number is how you get there, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn the_tenth_world_is_refused_before_the_prompt_opens() {
+        let mut a = filled_to_the_limit();
+        assert_eq!(a.boards().len(), MAX_WORLDS);
+
+        a.on_key(key(KeyCode::Char('w')));
+        assert_eq!(a.mode(), Mode::Nav, "the prompt does not even open");
+        assert!(a.prompt().is_none());
+        assert!(
+            a.status().is_some_and(|s| s.contains('9')),
+            "a refusal must say what the limit is, got {:?}",
+            a.status()
+        );
+        assert_eq!(a.boards().len(), MAX_WORLDS);
+    }
+
+    #[test]
+    fn the_tab_strip_drops_the_plus_at_the_limit() {
+        // A + that can only ever refuse is worse than no +.
+        let a = filled_to_the_limit();
+        let tabs = a.tabs();
+        assert_eq!(tabs.len(), MAX_WORLDS, "nine worlds and nothing else");
+        assert!(!tabs.iter().any(|t| matches!(t.kind, TabKind::New)));
     }
 
     #[test]
@@ -2090,11 +2214,12 @@ mod tests {
         a.on_key(key(KeyCode::Backspace));
         a.on_key(key(KeyCode::Char('b')));
         a.on_key(key(KeyCode::Enter));
-        assert_eq!(a.active_board().name, "ab");
+        assert_eq!(a.mode(), Mode::Nav, "the fixed name was accepted");
+        assert_eq!(a.boards().last().unwrap().name, "ab");
     }
 
     #[test]
-    fn naming_an_existing_world_switches_instead_of_duplicating() {
+    fn naming_an_existing_world_is_refused_rather_than_switched_to() {
         let mut a = app();
         let before = a.boards().len();
         let existing = a.boards()[1].name.clone();
@@ -2108,7 +2233,9 @@ mod tests {
             before,
             "two directories cannot share a name"
         );
-        assert_eq!(a.active_board().name, existing);
+        assert_eq!(a.mode(), Mode::Prompt, "the prompt stays open to be fixed");
+        assert!(a.prompt().unwrap().error.is_some(), "and says why");
+        assert_eq!(a.active_index(), 0, "a refusal does not move you either");
     }
 
     #[test]
@@ -2515,7 +2642,7 @@ mod tests {
         a.on_paste("world\nignored".to_string());
         a.on_key(key(KeyCode::Enter));
         assert_eq!(a.mode(), Mode::Nav);
-        assert_eq!(a.active_board().name, "world");
+        assert_eq!(a.boards().last().unwrap().name, "world");
     }
 
     #[test]

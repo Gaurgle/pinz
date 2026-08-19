@@ -144,11 +144,13 @@ is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
 detail, **drag a note** to move it, **drag the board** to pan (arrow keys too),
-`Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab strip for a
-new world, `n` for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to
-step the selection between pins, `e` or `enter` to edit the selected note
-(which zooms in and centers it; first line is the title, the rest the body;
-`enter` adds a line, `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
+`Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
+strip for a new world (it stays out of your way: the tab appears, you do not
+move to it, and nine is the limit because `1`-`9` are how you get there), `n`
+for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to step the
+selection between pins, `e` or `enter` to edit the selected note (which zooms in
+and centers it; first line is the title, the rest the body; `enter` adds a line,
+`alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves),
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
 `u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
@@ -194,7 +196,8 @@ any movement key:
 | `cmd`+`←`/`→` | jump to the start or end of the line |
 | `y` (in nav) | copy the selected note whole, title and body |
 
-`ctrl`+`c` still quits when nothing is selected, so the escape hatch survives.
+`ctrl`+`c` still quits when nothing is selected, so the escape hatch survives, and it
+saves the note you were typing on the way out, exactly as `esc` would.
 Typing over a selection replaces it, and `cmd`+`v` pastes back in.
 
 Copying uses **OSC 52**: the text is handed to your terminal, which owns the real
@@ -249,7 +252,8 @@ dragging a note doesn't churn the history.
 Setup lives under [Install](#install); this is what sync does once it is running.
 
 `~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits and
-pushes when you quit; `pinz sync` does both on demand. It only ever touches its own repo, so it can
+pushes when you quit, printing one line saying what git did (`ok push: committed and
+pushed`, `-- push: nothing to sync`); `pinz sync` does both on demand. It only ever touches its own repo, so it can
 never sweep up or be blocked by work in progress anywhere else.
 
 When the same pin changed on both machines, pinz settles what it safely can:
