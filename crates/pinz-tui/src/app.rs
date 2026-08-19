@@ -81,6 +81,10 @@ pub enum TabKind {
 /// A question the app is waiting on an answer to.
 #[derive(Debug, Clone)]
 pub struct Prompt {
+    /// Which question is being asked. The prompt looks the same either way;
+    /// what differs is what a confirmed answer means, so the kind rides on the
+    /// prompt rather than being inferred from its title.
+    pub kind: PromptKind,
     pub title: &'static str,
     pub hint: &'static str,
     /// What has been typed so far.
@@ -88,6 +92,15 @@ pub struct Prompt {
     /// Set when the last attempt to confirm was refused, so the reason can be
     /// shown without throwing away what was typed.
     pub error: Option<String>,
+}
+
+/// What an answered prompt does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Make a world with the name that was typed.
+    NewWorld,
+    /// Delete the world you are on, if the name that was typed is its own.
+    DeleteWorld,
 }
 
 /// The cursor movement a key means while editing, if it means one at all.
@@ -225,6 +238,11 @@ pub struct App {
     /// terminal itself - the runner drains this and does the I/O - which keeps
     /// this module a pure state machine, testable with no terminal attached.
     pending_copy: Option<String>,
+    /// Worlds whose directories are waiting to be removed. As with
+    /// `pending_copy`, the app names the work and the runner does it: nothing
+    /// here touches the filesystem, so a delete is testable with no board on
+    /// disk.
+    pending_deletes: Vec<String>,
     /// A one-off message for the footer, cleared by the next event. A copy is
     /// otherwise completely invisible.
     status: Option<String>,
@@ -283,6 +301,7 @@ impl App {
             theme_index: 0,
             revision: 0,
             pending_copy: None,
+            pending_deletes: Vec::new(),
             status: None,
             warning: None,
             read_only: false,
@@ -413,6 +432,13 @@ impl App {
     /// this after each event; a copy is delivered exactly once.
     pub fn take_pending_copy(&mut self) -> Option<String> {
         self.pending_copy.take()
+    }
+
+    /// Take the worlds waiting to be removed from the store. The runner calls
+    /// this immediately before a save, so the save that follows is the one that
+    /// puts back anything an undo has since brought back.
+    pub fn take_pending_deletes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_deletes)
     }
 
     /// Say something in the footer. For the runner, which finds out whether a
@@ -636,6 +662,7 @@ impl App {
             KeyCode::Char('c') => self.cycle_note_color(true),
             KeyCode::Char('C') => self.cycle_note_color(false),
             KeyCode::Char('w') => self.begin_new_world(),
+            KeyCode::Char('W') => self.begin_delete_world(),
             KeyCode::Char('y') => self.yank_note(),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
@@ -1113,12 +1140,64 @@ impl App {
             return;
         }
         self.prompt = Some(Prompt {
+            kind: PromptKind::NewWorld,
             title: "new world",
             hint: "enter to create · esc to cancel",
             input: String::new(),
             error: None,
         });
         self.mode = Mode::Prompt;
+    }
+
+    /// Delete the world you are on: outright if it is empty, on a typed
+    /// confirmation if there are pins to lose.
+    ///
+    /// Both refusals happen here rather than on confirm, for the reason
+    /// [`Self::begin_new_world`] gives: being asked for a name and only then
+    /// told it cannot happen is the wrong order to find out.
+    ///
+    /// The last world stays. Everything from [`Self::active_board`] to the tab
+    /// strip assumes there is a board to be on, and an empty state for every
+    /// renderer is a poor trade for a thing nobody wants to do.
+    fn begin_delete_world(&mut self) {
+        if self.refuse_if_read_only() {
+            return;
+        }
+        if self.boards.len() == 1 {
+            self.status = Some(format!("{} is the last world", self.active_board().name));
+            return;
+        }
+        // Nothing to lose, nothing to ask about.
+        if self.active_board().notes.is_empty() {
+            self.delete_active_world();
+            return;
+        }
+        self.prompt = Some(Prompt {
+            kind: PromptKind::DeleteWorld,
+            title: "delete world",
+            hint: "type its name to confirm · esc to cancel",
+            input: String::new(),
+            error: None,
+        });
+        self.mode = Mode::Prompt;
+    }
+
+    /// Drop the active world and queue its directory for the runner.
+    ///
+    /// The pins go with it: moving them out first is what dragging onto another
+    /// world's tab is for. Undo restores both, because the snapshot
+    /// [`Self::begin_step`] already took holds the whole workspace and the
+    /// store still knows which file each pin came from.
+    fn delete_active_world(&mut self) {
+        let gone = self.boards.remove(self.active);
+        self.pending_deletes.push(gone.name.clone());
+        // The tab that slid into this slot is the one to show; deleting the
+        // last tab falls back one.
+        self.active = self.active.min(self.boards.len() - 1);
+        self.selected = None;
+        self.centered = false; // re-center on whatever board we landed on
+        self.revision += 1;
+        self.status = Some(format!("deleted {}", gone.name));
     }
 
     fn prompt_key(&mut self, key: KeyEvent) {
@@ -1162,31 +1241,41 @@ impl App {
     /// Act on the prompt's answer. A refusal keeps the prompt open with the
     /// typed text intact and the reason shown - retyping a name because of a
     /// stray slash would be its own small insult.
+    fn confirm_prompt(&mut self) {
+        let (kind, answer) = {
+            let Some(prompt) = self.prompt.as_ref() else {
+                return;
+            };
+            (prompt.kind, prompt.input.trim().to_string())
+        };
+        let outcome = match kind {
+            PromptKind::NewWorld => self.create_world(&answer),
+            PromptKind::DeleteWorld => self.confirm_delete_world(&answer),
+        };
+        if let Err(why) = outcome {
+            if let Some(prompt) = self.prompt.as_mut() {
+                prompt.error = Some(why);
+            }
+            return;
+        }
+        self.prompt = None;
+        self.mode = Mode::Nav;
+    }
+
+    /// Make a world, or say why not.
     ///
     /// Creating a world does not switch to it. Naming one is something you do
     /// *while* working on another board, and being carried off the board you
     /// were looking at is a worse surprise than having to press its number.
     /// A name already on a tab is refused for the same reason: it would be the
     /// one way `w` could still move you.
-    fn confirm_prompt(&mut self) {
-        let Some(prompt) = self.prompt.as_ref() else {
-            return;
-        };
-        let name = prompt.input.trim().to_string();
-        let refusal = validate_board_name(&name).err().or_else(|| {
-            // Two directories cannot share a name anyway.
-            self.boards
-                .iter()
-                .any(|b| b.name == name)
-                .then(|| format!("{name} already exists"))
-        });
-        if let Some(why) = refusal {
-            if let Some(prompt) = self.prompt.as_mut() {
-                prompt.error = Some(why);
-            }
-            return;
+    fn create_world(&mut self, name: &str) -> Result<(), String> {
+        validate_board_name(name)?;
+        // Two directories cannot share a name anyway.
+        if self.boards.iter().any(|b| b.name == name) {
+            return Err(format!("{name} already exists"));
         }
-        self.boards.push(Board::new(name.clone()));
+        self.boards.push(Board::new(name.to_string()));
         self.revision += 1;
         // Staying put means a growing tab strip is the only sign anything
         // happened, so say what was made and which key opens it.
@@ -1194,8 +1283,21 @@ impl App {
             "created {name} · press {} to open it",
             self.boards.len()
         ));
-        self.prompt = None;
-        self.mode = Mode::Nav;
+        Ok(())
+    }
+
+    /// Delete the world you are on, if what was typed is its name.
+    ///
+    /// Its name rather than a yes/no: the pins on a world are worth more than
+    /// one keystroke of protection, and a name you have to read off the tab
+    /// strip to type is a name you have looked at.
+    fn confirm_delete_world(&mut self, answer: &str) -> Result<(), String> {
+        let name = self.active_board().name.clone();
+        if answer != name {
+            return Err(format!("type {name} to delete it"));
+        }
+        self.delete_active_world();
+        Ok(())
     }
 
     // ---- mouse ----
@@ -2389,6 +2491,172 @@ mod tests {
             a.status()
         );
         assert_eq!(a.boards().len(), MAX_WORLDS);
+    }
+
+    /// A world with nothing on it, made the way you would make one, and left
+    /// as the world you are looking at.
+    fn app_with_an_empty_world() -> App {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('w')));
+        type_into(&mut a, "scratch");
+        a.on_key(key(KeyCode::Enter));
+        let tab = char::from_digit(a.boards().len() as u32, 10).unwrap();
+        a.on_key(key(KeyCode::Char(tab)));
+        a
+    }
+
+    fn type_into(a: &mut App, text: &str) {
+        for c in text.chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn shift_w_will_not_delete_the_last_world() {
+        let mut a = App::new(vec![Board::new("ideas")]);
+        a.on_key(shift(KeyCode::Char('W')));
+
+        assert_eq!(a.boards().len(), 1, "the last world stays");
+        assert_eq!(a.mode(), Mode::Nav, "and is not even asked about");
+        assert!(
+            a.status().is_some_and(|s| s.contains("ideas")),
+            "a refusal should name the world, got {:?}",
+            a.status()
+        );
+    }
+
+    #[test]
+    fn a_read_only_board_refuses_to_delete_a_world() {
+        let mut a = app();
+        a.set_read_only(true);
+        let before = a.boards().len();
+        a.on_key(shift(KeyCode::Char('W')));
+
+        assert_eq!(a.boards().len(), before);
+        assert_eq!(a.mode(), Mode::Nav);
+        assert!(a.take_pending_deletes().is_empty());
+    }
+
+    #[test]
+    fn an_empty_world_goes_without_being_asked_about() {
+        let mut a = app_with_an_empty_world();
+        let before = a.boards().len();
+        assert!(a.active_board().notes.is_empty());
+
+        a.on_key(shift(KeyCode::Char('W')));
+
+        assert_eq!(a.mode(), Mode::Nav, "nothing to confirm on an empty world");
+        assert_eq!(a.boards().len(), before - 1);
+        assert!(!a.boards().iter().any(|b| b.name == "scratch"));
+        assert!(
+            a.status().is_some_and(|s| s.contains("scratch")),
+            "got {:?}",
+            a.status()
+        );
+    }
+
+    #[test]
+    fn a_world_with_pins_on_it_asks_for_its_name_first() {
+        let mut a = app();
+        let (before, name) = (a.boards().len(), a.active_board().name.clone());
+
+        a.on_key(shift(KeyCode::Char('W')));
+        assert_eq!(a.mode(), Mode::Prompt);
+        assert!(a.prompt().is_some());
+        assert_eq!(a.boards().len(), before, "nothing is gone yet");
+
+        type_into(&mut a, &name);
+        a.on_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode(), Mode::Nav);
+        assert_eq!(a.boards().len(), before - 1);
+        assert!(!a.boards().iter().any(|b| b.name == name));
+    }
+
+    #[test]
+    fn the_wrong_name_keeps_the_world_and_what_you_typed() {
+        let mut a = app();
+        let before = a.boards().len();
+        a.on_key(shift(KeyCode::Char('W')));
+        type_into(&mut a, "ideaz");
+        a.on_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode(), Mode::Prompt, "the prompt stays open");
+        let prompt = a.prompt().unwrap();
+        assert_eq!(prompt.input, "ideaz", "and keeps what was typed");
+        assert!(prompt.error.is_some(), "with the reason shown");
+        assert_eq!(a.boards().len(), before);
+    }
+
+    #[test]
+    fn esc_out_of_the_delete_prompt_leaves_the_worlds_alone() {
+        let mut a = app();
+        let before = a.boards().len();
+        a.on_key(shift(KeyCode::Char('W')));
+        a.on_key(key(KeyCode::Esc));
+
+        assert_eq!(a.mode(), Mode::Nav);
+        assert!(a.prompt().is_none());
+        assert_eq!(a.boards().len(), before);
+        assert!(a.take_pending_deletes().is_empty());
+    }
+
+    #[test]
+    fn deleting_the_last_tab_falls_back_one() {
+        let mut a = app();
+        let last = a.boards().len() - 1;
+        a.on_key(key(KeyCode::Char(
+            char::from_digit(a.boards().len() as u32, 10).unwrap(),
+        )));
+        assert_eq!(a.active_index(), last);
+        let name = a.active_board().name.clone();
+
+        a.on_key(shift(KeyCode::Char('W')));
+        type_into(&mut a, &name);
+        a.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            a.active_index(),
+            last - 1,
+            "the tab beside it is the one to show"
+        );
+        assert!(a.selected().is_none());
+    }
+
+    #[test]
+    fn undo_brings_a_deleted_world_back_with_its_pins() {
+        let mut a = app();
+        let before = a.boards().to_vec();
+        let name = a.active_board().name.clone();
+
+        a.on_key(shift(KeyCode::Char('W')));
+        type_into(&mut a, &name);
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.boards().len(), before.len() - 1);
+
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(a.boards(), before, "pins and all");
+        assert_eq!(a.active_index(), 0);
+    }
+
+    #[test]
+    fn a_deleted_world_is_handed_over_exactly_once() {
+        let mut a = app_with_an_empty_world();
+        a.on_key(shift(KeyCode::Char('W')));
+
+        assert_eq!(a.take_pending_deletes(), vec!["scratch".to_string()]);
+        assert!(
+            a.take_pending_deletes().is_empty(),
+            "a delete is delivered once"
+        );
+    }
+
+    #[test]
+    fn deleting_a_world_is_a_change_worth_saving() {
+        let mut a = app_with_an_empty_world();
+        let before = a.revision();
+        a.on_key(shift(KeyCode::Char('W')));
+        assert!(a.revision() > before);
     }
 
     #[test]

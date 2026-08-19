@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use app::App;
 use pinz_core::{
     lock::{BoardLock, Ownership},
-    Board, Color, FileStore, Note, Store, Sync, SyncOutcome,
+    Board, Color, FileStore, Note, Store, StoreError, Sync, SyncOutcome,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
@@ -389,7 +389,7 @@ fn run_app(opts: Options) -> io::Result<()> {
 
     // A last save catches anything the loop deferred (a quit mid-drag).
     if !app.read_only() {
-        if let Err(e) = store.save(app.boards()) {
+        if let Err(e) = persist(&mut app, &mut store) {
             eprintln!("!! could not write pins: {e}");
             return Ok(());
         }
@@ -488,7 +488,7 @@ fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<O
         // never writes at all - the app reverts its changes, and this makes
         // sure not even the revert reaches the disk.
         if !app.read_only() && app.revision() != saved && !app.is_dragging() {
-            if let Err(e) = store.save(app.boards()) {
+            if let Err(e) = persist(app, store) {
                 return Ok(Some(e.to_string()));
             }
             saved = app.revision();
@@ -524,6 +524,22 @@ fn deliver_copy(out: &mut impl io::Write, app: &mut App) {
     if let Err(e) = clipboard::copy(out, &text) {
         app.set_status(format!("copy failed: {e}"));
     }
+}
+
+/// Remove the worlds the app dropped, then write what is left.
+///
+/// Deletes first: a save writes every board it is handed, so doing it the other
+/// way round would recreate a directory we are about to remove. A world that
+/// never reached the disk - made and deleted in one session - is not on it to
+/// remove, and that is not a reason to fail the save.
+fn persist(app: &mut App, store: &mut dyn Store) -> Result<(), StoreError> {
+    for name in app.take_pending_deletes() {
+        match store.delete_board(&name) {
+            Ok(()) | Err(StoreError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    store.save(app.boards())
 }
 
 #[cfg(test)]
@@ -599,6 +615,48 @@ mod tests {
             before,
             "a release must not type"
         );
+    }
+
+    /// A board with one world you can delete and one you cannot, and an app
+    /// looking at the second.
+    fn app_on_a_spare_world(store: &mut pinz_core::MemoryStore) -> App {
+        store
+            .save(&[Board::new("ideas"), Board::new("scratch")])
+            .unwrap();
+        let mut app = App::new(store.load().unwrap());
+        apply(&mut app, press(KeyCode::Char('2'), KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn a_deleted_world_leaves_the_store_before_the_save_can_rewrite_it() {
+        let mut store = pinz_core::MemoryStore::empty();
+        let mut app = app_on_a_spare_world(&mut store);
+        apply(&mut app, press(KeyCode::Char('W'), KeyModifiers::SHIFT));
+
+        persist(&mut app, &mut store).unwrap();
+
+        let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["ideas"]);
+    }
+
+    #[test]
+    fn a_world_that_never_reached_the_store_is_not_a_failed_save() {
+        // Made and deleted between two saves, so the store never heard of it.
+        let mut store = pinz_core::MemoryStore::empty();
+        store.save(&[Board::new("ideas")]).unwrap();
+        let mut app = App::new(store.load().unwrap());
+        apply(&mut app, press(KeyCode::Char('w'), KeyModifiers::NONE));
+        for c in "scratch".chars() {
+            apply(&mut app, press(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        apply(&mut app, press(KeyCode::Enter, KeyModifiers::NONE));
+        apply(&mut app, press(KeyCode::Char('2'), KeyModifiers::NONE));
+        apply(&mut app, press(KeyCode::Char('W'), KeyModifiers::SHIFT));
+
+        assert!(persist(&mut app, &mut store).is_ok());
+        let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["ideas"]);
     }
 
     #[test]

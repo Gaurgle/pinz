@@ -84,8 +84,10 @@ configured` without a TTY. Assertions about rendering go through Ratatui's
   the reverse. That one-way arrow is the whole reason a terminal app and a
   desktop app can share one brain.
 - **`pinz-core` does no I/O except through `Store`.** The trait is deliberately
-  coarse - whole-workspace `load`/`save` - and widens only when a real backend
-  needs it, so it does not grow speculative methods no caller uses.
+  coarse - whole-workspace `load`/`save`, plus `delete_board`, which exists
+  because a save cannot tell a deleted world from one that was never there -
+  and widens only when a real caller needs it, so it does not grow speculative
+  methods nobody uses.
 - **One file per pin, one directory per board.** Pins live in a git repo synced
   between machines; a single board file would conflict whenever both ends
   touched anything on that board. Per-pin files mean a drag does not churn the

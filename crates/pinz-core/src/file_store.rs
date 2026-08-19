@@ -224,6 +224,27 @@ impl Store for FileStore {
         self.paths = written;
         Ok(())
     }
+
+    /// Remove the board's directory, pins and all.
+    ///
+    /// This takes files we never loaded with it, which is the opposite of the
+    /// rule `save` follows. It is deliberate: a world *is* its directory, so a
+    /// delete that left the directory standing would be undone by the next
+    /// load. The command is explicit and, for a board with pins on it,
+    /// confirmed by name - unlike the incidental pruning `save` does - and the
+    /// pin root is a git repo, so `pinz sync` carries the deletion as a commit
+    /// that history can still be read back out of.
+    ///
+    /// The `paths` map keeps its entries for the pins that were here. That is
+    /// what lets an undo put the board back: the next `save` writes each note
+    /// to the file it came from, rather than inventing new ones.
+    fn delete_board(&mut self, name: &str) -> Result<()> {
+        let dir = self.root.join(name);
+        if !dir.is_dir() {
+            return Err(StoreError::NotFound(format!("board {name}")));
+        }
+        fs::remove_dir_all(&dir).map_err(|e| backend("deleting a board directory", e))
+    }
 }
 
 // ---- the pin file format ----
@@ -588,6 +609,92 @@ mod tests {
         let loaded = fresh.load().unwrap();
         assert_eq!(loaded.len(), 1, "the empty board still shows up");
         assert!(loaded[0].notes.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_board_takes_its_directory_with_it() {
+        let root = TempRoot::new("delete-board");
+        let mut store = FileStore::open(root.path()).unwrap();
+        store
+            .save(&[
+                Board {
+                    name: "ideas".to_string(),
+                    notes: vec![note(1, "Keep", "")],
+                },
+                Board {
+                    name: "sketches".to_string(),
+                    notes: vec![note(2, "Go", "")],
+                },
+            ])
+            .unwrap();
+
+        store.delete_board("sketches").unwrap();
+
+        assert!(!root.path().join("sketches").exists());
+        assert!(root.path().join("ideas").exists(), "and nothing else");
+    }
+
+    #[test]
+    fn a_deleted_board_is_gone_from_the_next_load() {
+        let root = TempRoot::new("delete-load");
+        let mut store = FileStore::open(root.path()).unwrap();
+        store
+            .save(&[
+                Board {
+                    name: "ideas".to_string(),
+                    notes: vec![note(1, "Keep", "")],
+                },
+                Board {
+                    name: "sketches".to_string(),
+                    notes: vec![note(2, "Go", "")],
+                },
+            ])
+            .unwrap();
+        store.delete_board("sketches").unwrap();
+        // The runner saves right after deleting, with the board already gone
+        // from the app's list.
+        store
+            .save(&[Board {
+                name: "ideas".to_string(),
+                notes: vec![note(1, "Keep", "")],
+            }])
+            .unwrap();
+
+        let mut fresh = FileStore::open(root.path()).unwrap();
+        let names: Vec<String> = fresh.load().unwrap().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["ideas"]);
+    }
+
+    /// What makes undoing a world delete restore its pins rather than rebuild
+    /// them: the store still knows which file each note came from, so handing
+    /// the board back produces the same paths.
+    #[test]
+    fn handing_back_a_deleted_board_puts_its_pins_at_their_old_paths() {
+        let root = TempRoot::new("delete-undo");
+        let mut store = FileStore::open(root.path()).unwrap();
+        let boards = vec![Board {
+            name: "sketches".to_string(),
+            notes: vec![note(1, "Comes back", "with its body")],
+        }];
+        store.save(&boards).unwrap();
+        let path = store.paths[&1].clone();
+
+        store.delete_board("sketches").unwrap();
+        assert!(!path.exists());
+
+        store.save(&boards).unwrap();
+        assert_eq!(store.paths[&1], path, "same file, not a new one");
+        assert_eq!(fs::read_to_string(&path).unwrap(), render_pin(&boards[0].notes[0]));
+    }
+
+    #[test]
+    fn deleting_a_board_that_is_not_there_is_not_found() {
+        let root = TempRoot::new("delete-missing");
+        let mut store = FileStore::open(root.path()).unwrap();
+        assert!(matches!(
+            store.delete_board("ghost"),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]

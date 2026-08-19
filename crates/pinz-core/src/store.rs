@@ -42,6 +42,14 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub trait Store {
     fn load(&mut self) -> Result<Vec<Board>>;
     fn save(&mut self, boards: &[Board]) -> Result<()>;
+
+    /// Remove a board and everything on it.
+    ///
+    /// Separate from `save` because `save` writes the boards it is handed and
+    /// cannot tell a board that was deleted from one that was never there -
+    /// another machine's world, arrived by sync, would look the same. Deleting
+    /// is a thing you say, not something inferred from an absence.
+    fn delete_board(&mut self, name: &str) -> Result<()>;
 }
 
 /// In-memory store, optionally seeded with demo content. Enough to bring a
@@ -75,6 +83,15 @@ impl Store for MemoryStore {
 
     fn save(&mut self, boards: &[Board]) -> Result<()> {
         self.boards = boards.to_vec();
+        Ok(())
+    }
+
+    fn delete_board(&mut self, name: &str) -> Result<()> {
+        let before = self.boards.len();
+        self.boards.retain(|b| b.name != name);
+        if self.boards.len() == before {
+            return Err(StoreError::NotFound(name.to_string()));
+        }
         Ok(())
     }
 }
@@ -135,6 +152,27 @@ mod tests {
         let boards = store.load().unwrap();
         assert_eq!(boards.len(), 3);
         assert!(boards.iter().all(|b| !b.notes.is_empty()));
+    }
+
+    #[test]
+    fn deleting_a_board_drops_it_from_the_store() {
+        let mut store = MemoryStore::empty();
+        store
+            .save(&[Board::new("ideas"), Board::new("scratch")])
+            .unwrap();
+        store.delete_board("scratch").unwrap();
+        let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["ideas"]);
+    }
+
+    #[test]
+    fn deleting_a_board_that_is_not_there_is_not_found() {
+        let mut store = MemoryStore::empty();
+        store.save(&[Board::new("ideas")]).unwrap();
+        assert!(matches!(
+            store.delete_board("ghost"),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]

@@ -146,7 +146,8 @@ The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
 detail, **drag a note** to move it, **drag the board** to pan (arrow keys too),
 `Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
 strip for a new world (it stays out of your way: the tab appears, you do not
-move to it, and nine is the limit because `1`-`9` are how you get there), `n`
+move to it, and nine is the limit because `1`-`9` are how you get there), `W` to
+delete the world you are on, `n`
 for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to step the
 selection between pins, `e` or `enter` to edit the selected note (which zooms in
 and centers it; first line is the title, the rest the body; `enter` adds a line,
@@ -155,6 +156,16 @@ and centers it; first line is the title, the rest the body; `enter` adds a line,
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
 `u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
 the active one is named in the header), `q` to quit.
+
+### Deleting a world
+
+`W` deletes the world you are on, pins and all. An empty world goes straight
+away; one with pins on it asks you to type its name first. The last world stays:
+there is always a board to be on.
+
+`u` brings it back, pins and all, as long as you are still in the session. After
+that the pin repo is git, so a deleted world is in the history: `pinz sync`
+carries the deletion as a commit like any other change.
 
 ### Moving a pin to another world
 
@@ -171,7 +182,7 @@ or anywhere else does nothing.
 
 `u` undoes, `ctrl`+`r` redoes, and pinz remembers the last 50 changes. Undo
 covers anything that changes a board: new pins, deletes, recolors, edits, moves,
-new worlds, and pins sent to another world. Undoing a change made on another
+new and deleted worlds, and pins sent to another world. Undoing a change made on another
 world takes you back to that world so you can see it happen.
 
 The step size is what you would expect rather than what is easy: a whole drag is
