@@ -17,6 +17,7 @@ use crate::theme::{self, Theme};
 use crate::view::{CellRect, View};
 use crate::wrap::{self, Wrapped};
 use std::collections::VecDeque;
+use std::time::Duration;
 
 /// Arrow-key pan step, in cells.
 const PAN_CELLS: f64 = 4.0;
@@ -161,6 +162,19 @@ enum Drag {
     Text,
 }
 
+/// How long the camera takes to travel to a jump's destination.
+///
+/// A guess to be tuned in use, including over SSH where every frame is a round
+/// trip. See `design/specs/2026-08-19-camera-glide.md`.
+const GLIDE: Duration = Duration::from_millis(140);
+
+/// A camera glide in flight: where the view was when it started, and how far
+/// through it we are. Only the origin travels; zoom cuts.
+struct Glide {
+    from: WorldPoint,
+    elapsed: Duration,
+}
+
 /// One step of keyboard selection, in board directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
@@ -177,6 +191,9 @@ pub struct App {
     /// Currently selected note (by id), if any.
     selected: Option<u64>,
     mode: Mode,
+    /// A camera glide in flight, if any. `self.camera` is always where we are
+    /// *going*; this is what stands between that and what is on screen.
+    glide: Option<Glide>,
     /// Whether the key list is up.
     ///
     /// A flag beside the mode rather than a fourth [`Mode`], because help is
@@ -253,6 +270,7 @@ impl App {
             },
             selected: None,
             mode: Mode::Nav,
+            glide: None,
             help: false,
             editor: None,
             drag: None,
@@ -290,8 +308,62 @@ impl App {
     pub fn active_board(&self) -> &Board {
         &self.boards[self.active]
     }
+    /// The camera **as it appears on screen**, which is the target camera only
+    /// when nothing is travelling.
+    ///
+    /// Drawing and hit-testing both read this, so a click during a glide lands
+    /// on the pin you can see rather than one that has not arrived yet.
     pub fn camera(&self) -> Camera {
-        self.camera
+        let Some(glide) = &self.glide else {
+            return self.camera;
+        };
+        let t = (glide.elapsed.as_secs_f64() / GLIDE.as_secs_f64()).clamp(0.0, 1.0);
+        // Ease out: the board decelerates into place rather than stopping dead.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        Camera {
+            origin: WorldPoint {
+                x: glide.from.x + (self.camera.origin.x - glide.from.x) * eased,
+                y: glide.from.y + (self.camera.origin.y - glide.from.y) * eased,
+            },
+            zoom: self.camera.zoom,
+        }
+    }
+
+    /// Whether anything is moving. The runner blocks for input unless this is
+    /// true, which is what keeps pinz at zero CPU sitting open on a desk.
+    pub fn animating(&self) -> bool {
+        self.glide.is_some()
+    }
+
+    /// Advance any animation by `dt`.
+    ///
+    /// Elapsed time is handed in rather than read, so `App` keeps its promise
+    /// to be a state machine with no I/O, and tests advance time explicitly
+    /// instead of sleeping. Deliberately does not touch `revision`: the runner
+    /// writes pins to disk when that moves, and a glide changes no board data.
+    pub fn tick(&mut self, dt: Duration) {
+        let Some(glide) = self.glide.as_mut() else {
+            return;
+        };
+        glide.elapsed += dt;
+        if glide.elapsed >= GLIDE {
+            self.glide = None;
+        }
+    }
+
+    /// Send the camera to a new origin as a jump: it travels rather than cuts.
+    ///
+    /// The glide starts from what is currently *on screen*, so a second jump
+    /// mid-flight carries on from where the eye is instead of lurching back to
+    /// where the last one began.
+    fn glide_to(&mut self, origin: WorldPoint) {
+        let shown = self.camera().origin;
+        self.camera.origin = origin;
+        self.clamp_origin();
+        self.glide = (self.camera.origin != shown).then_some(Glide {
+            from: shown,
+            elapsed: Duration::ZERO,
+        });
     }
     pub fn zoom(&self) -> ZoomLevel {
         self.camera.zoom
@@ -495,7 +567,7 @@ impl App {
     }
 
     fn view(&self) -> View {
-        View::new(self.camera, self.viewport)
+        View::new(self.camera(), self.viewport)
     }
 
     fn active_board_mut(&mut self) -> &mut Board {
@@ -829,11 +901,10 @@ impl App {
             return;
         };
         let (sx, sy) = self.view().scale();
-        self.camera.origin = WorldPoint {
+        self.glide_to(WorldPoint {
             x: cx - (self.viewport.width as f64 / 2.0) / sx,
             y: cy - (self.viewport.height as f64 / 2.0) / sy,
-        };
-        self.clamp_origin();
+        });
     }
 
     fn note_center(&self, id: u64) -> Option<(f64, f64)> {
@@ -919,9 +990,17 @@ impl App {
             .map(|(_, id)| id)
     }
 
-    /// Scroll the least that puts a pin fully on screen, and not at all if it
-    /// already is. Stepping between pins you can see should leave the board
-    /// where it is; only one off the edge is worth moving the board for.
+    /// Put a pin on screen if it is not already, by centring it.
+    ///
+    /// A pin you can already see does not move the board at all: stepping
+    /// between neighbours should stay calm, and you keep your sense of where
+    /// you are.
+    ///
+    /// When the board *does* have to move it centres, rather than scrolling the
+    /// least that makes the pin fit. Minimum scroll leaves the pin flush against
+    /// whichever edge it came in from, so where a pin ended up was a function of
+    /// which direction you approached it - arriving at the same pin from the
+    /// left and from the right put it in opposite corners.
     fn bring_into_view(&mut self, id: u64) {
         let Some((x, y)) = self
             .active_board()
@@ -935,23 +1014,15 @@ impl App {
         let (sx, sy) = self.view().scale();
         let view_w = self.viewport.width as f64 / sx;
         let view_h = self.viewport.height as f64 / sy;
-        let mut origin = self.camera.origin;
-        // Far edge first, then the near one, so a pin bigger than the viewport
-        // settles showing its top-left rather than its bottom-right.
-        if x + NOTE_W > origin.x + view_w {
-            origin.x = x + NOTE_W - view_w;
+        let origin = self.camera.origin;
+        let on_screen = x >= origin.x
+            && x + NOTE_W <= origin.x + view_w
+            && y >= origin.y
+            && y + NOTE_H <= origin.y + view_h;
+        if on_screen {
+            return;
         }
-        if x < origin.x {
-            origin.x = x;
-        }
-        if y + NOTE_H > origin.y + view_h {
-            origin.y = y + NOTE_H - view_h;
-        }
-        if y < origin.y {
-            origin.y = y;
-        }
-        self.camera.origin = origin;
-        self.clamp_origin();
+        self.center_on_note(id);
     }
 
     fn edit_key(&mut self, key: KeyEvent) {
@@ -1354,6 +1425,7 @@ impl App {
                 row: r0,
                 origin,
             }) => {
+                self.glide = None; // the board follows the pointer, 1:1
                 let (sx, sy) = self.view().scale();
                 let dx = (col as f64 - c0 as f64) / sx;
                 let dy = (row as f64 - r0 as f64) / sy;
@@ -1395,6 +1467,9 @@ impl App {
         if target == self.camera.zoom {
             return;
         }
+        // Zoom cuts, so the origin shift that comes with it cuts too: gliding
+        // the pan while the scale jumps under it looks worse than either.
+        self.glide = None;
         let anchor = self.view().world_at(col, row);
         self.camera.zoom = target;
         // Shift the origin so `anchor` lands back under the same cell.
@@ -1419,6 +1494,7 @@ impl App {
     // ---- pan ----
 
     fn pan_cells(&mut self, dx: f64, dy: f64) {
+        self.glide = None; // a manipulation, not a jump: 1:1 or it reads as lag
         let (sx, sy) = self.view().scale();
         self.camera.origin.x += dx / sx;
         self.camera.origin.y += dy / sy;
@@ -1467,6 +1543,9 @@ impl App {
     }
 
     fn center_on_content(&mut self) {
+        // Opening a board, or arriving in a new world: there is no continuous
+        // space between where you were and here to travel through.
+        self.glide = None;
         let (sx, sy) = self.view().scale();
         let center = match self.content_bounds() {
             Some((min, max)) => WorldPoint {
@@ -1720,6 +1799,7 @@ mod tests {
         );
 
         a.on_key(shift(KeyCode::Right)); // pin 2, off to the right
+        a.tick(GLIDE); // it travels rather than jumping; let it arrive
         assert_ne!(a.camera().origin, still, "an off-screen pin must be fetched");
         let (cx, cy) = pin_cell(&a, 2);
         assert!(
@@ -1743,11 +1823,142 @@ mod tests {
         );
     }
 
+    // ---- camera glide (design/specs/2026-08-19-camera-glide.md) ----
+
+    #[test]
+    fn a_step_to_an_off_screen_pin_glides_rather_than_jumping() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1, already on screen
+        let before = a.camera().origin;
+
+        a.on_key(shift(KeyCode::Right)); // pin 2, off to the right
+        assert!(a.animating(), "an off-screen pin starts a glide");
+        assert_eq!(a.camera().origin, before, "the board has not moved yet");
+
+        a.tick(GLIDE);
+        assert!(!a.animating(), "and the glide finishes");
+        let (cx, _) = pin_cell(&a, 2);
+        assert!(
+            cx > 0.0 && cx < VIEWPORT.width as f64,
+            "pin 2 never arrived: {cx}"
+        );
+    }
+
+    #[test]
+    fn half_a_glide_is_partway_there() {
+        // Otherwise a "glide" that snapped straight to the end would pass any
+        // test that only checked where it finished.
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right));
+        let from = a.camera().origin;
+        a.on_key(shift(KeyCode::Right));
+
+        a.tick(GLIDE / 2);
+        let mid = a.camera().origin;
+        a.tick(GLIDE);
+        let to = a.camera().origin;
+        assert!(
+            mid.x > from.x && mid.x < to.x,
+            "not between: {} .. {} .. {}",
+            from.x,
+            mid.x,
+            to.x
+        );
+    }
+
+    #[test]
+    fn a_step_mid_glide_carries_on_from_what_is_on_screen() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1
+        a.on_key(shift(KeyCode::Right)); // pin 2, glide starts
+        a.tick(GLIDE / 2);
+        let shown = a.camera().origin;
+
+        a.on_key(shift(KeyCode::Left)); // back to pin 1, mid-flight
+        assert!(a.animating(), "still travelling");
+        assert_eq!(
+            a.camera().origin,
+            shown,
+            "a retarget must not lurch back to where the last one began"
+        );
+    }
+
+    #[test]
+    fn a_pin_fetched_from_off_screen_lands_in_the_middle() {
+        // Scrolling the least that made a pin fit put it flush against the edge
+        // it came in from, so where a pin ended up depended on which way you
+        // approached it - and it was never the middle.
+        let mut a = app_with_pins(PINS);
+        for _ in 0..3 {
+            a.on_key(key(KeyCode::Char('+'))); // document zoom, so pins do not all fit
+        }
+        a.on_key(shift(KeyCode::Right)); // land on pin 1
+        a.tick(GLIDE);
+
+        let (mid_x, mid_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
+        for (step, from) in [
+            (KeyCode::Right, "the left"),
+            (KeyCode::Left, "the right"),
+            (KeyCode::Down, "above"),
+            (KeyCode::Up, "below"),
+        ] {
+            a.on_key(shift(step));
+            a.tick(GLIDE);
+            let id = a.selected().unwrap();
+            let (cx, cy) = pin_cell(&a, id);
+            assert!(
+                (cx - mid_x).abs() < 1.0,
+                "pin {id} approached from {from} landed at x={cx}, wanted {mid_x}"
+            );
+            assert!(
+                (cy - mid_y).abs() < 1.0,
+                "pin {id} approached from {from} landed at y={cy}, wanted {mid_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glide_writes_no_pins() {
+        // The runner saves when `revision` moves. An animation that bumped it
+        // would rewrite every pin file at frame rate.
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right));
+        a.on_key(shift(KeyCode::Right));
+        let rev = a.revision();
+        a.tick(GLIDE / 2);
+        a.tick(GLIDE);
+        assert_eq!(a.revision(), rev);
+    }
+
+    #[test]
+    fn a_manipulation_cuts_and_cancels_a_glide() {
+        // Your hand is on these, so anything but 1:1 reads as lag.
+        let arrow_pan = |a: &mut App| a.on_key(key(KeyCode::Right));
+        let zoom = |a: &mut App| a.on_key(key(KeyCode::Char('+')));
+        let drag = |a: &mut App| {
+            a.on_mouse(mouse_down(5, 5)); // empty board, above every pin
+            a.on_mouse(mouse_drag(20, 5));
+        };
+        for (act, what) in [
+            (&arrow_pan as &dyn Fn(&mut App), "an arrow pan"),
+            (&zoom, "a zoom"),
+            (&drag, "a drag"),
+        ] {
+            let mut a = app_with_pins(PINS);
+            a.on_key(shift(KeyCode::Right));
+            a.on_key(shift(KeyCode::Right));
+            assert!(a.animating(), "setup: a glide should be in flight");
+            act(&mut a);
+            assert!(!a.animating(), "{what} must cut, not glide");
+        }
+    }
+
     #[test]
     fn e_centres_the_pin_it_opens() {
         let mut a = app_with_pins(PINS);
         a.on_key(shift(KeyCode::Right)); // pin 1
         a.on_key(key(KeyCode::Char('e')));
+        a.tick(GLIDE); // e glides there like any other jump
         assert_eq!(a.zoom(), ZoomLevel::Document);
         let (cx, cy) = pin_cell(&a, 1);
         let (want_x, want_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
