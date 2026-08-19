@@ -500,7 +500,7 @@ impl App {
         match key.code {
             KeyCode::Char('r') if ctrl => self.redo_step(),
             KeyCode::Char('u') => self.undo_step(),
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.quit(),
             KeyCode::Esc => self.selected = None,
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_at_center(true),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_at_center(false),
@@ -650,7 +650,7 @@ impl App {
         }
         // Nothing to copy. Ctrl-C falls back to its old job; Cmd-C has none.
         if ctrl && !cut {
-            self.should_quit = true;
+            self.quit();
         }
         true
     }
@@ -810,6 +810,20 @@ impl App {
         }
         self.editor = None;
         self.mode = Mode::Nav;
+    }
+
+    /// Leave, saving whatever is open on the way out.
+    ///
+    /// Every quit key goes through here so none of them can forget the commit.
+    /// In nav there is no editor and this is just a flag; in edit it is the
+    /// difference between keeping the note you were typing and losing it. The
+    /// reason is the one `commit_edit` already gives for Esc: a whole note is
+    /// too much to lose to a single key. Ctrl-C is the only way out of edit
+    /// mode - `q` there is a letter - so without this the exit key was also
+    /// the discard key.
+    fn quit(&mut self) {
+        self.commit_edit();
+        self.should_quit = true;
     }
 
     /// Open the prompt that names a new world.
@@ -1441,6 +1455,22 @@ mod tests {
         let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(note.title, "new notehi");
         assert_eq!(note.body, "");
+    }
+
+    #[test]
+    fn quitting_mid_edit_saves_the_note() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n'))); // edit, editor holds "new note"
+        a.on_key(key(KeyCode::Enter));
+        for c in "body".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL)); // the only way out of edit
+        assert!(a.should_quit());
+        let id = a.selected().unwrap();
+        let note = a.active_board().notes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note.title, "new note");
+        assert_eq!(note.body, "body", "quitting must not drop the open edit");
     }
 
     #[test]

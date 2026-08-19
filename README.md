@@ -188,7 +188,8 @@ any movement key:
 | `cmd`+`←`/`→` | jump to the start or end of the line |
 | `y` (in nav) | copy the selected note whole, title and body |
 
-`ctrl`+`c` still quits when nothing is selected, so the escape hatch survives.
+`ctrl`+`c` still quits when nothing is selected, so the escape hatch survives, and it
+saves the note you were typing on the way out, exactly as `esc` would.
 Typing over a selection replaces it, and `cmd`+`v` pastes back in.
 
 Copying uses **OSC 52**: the text is handed to your terminal, which owns the real
@@ -243,7 +244,8 @@ dragging a note doesn't churn the history.
 Setup lives under [Install](#install); this is what sync does once it is running.
 
 `~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits and
-pushes when you quit; `pinz sync` does both on demand. It only ever touches its own repo, so it can
+pushes when you quit, printing one line saying what git did (`ok push: committed and
+pushed`, `-- push: nothing to sync`); `pinz sync` does both on demand. It only ever touches its own repo, so it can
 never sweep up or be blocked by work in progress anywhere else.
 
 When the same pin changed on both machines, pinz settles what it safely can:
