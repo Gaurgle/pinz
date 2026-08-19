@@ -1,6 +1,6 @@
 # Camera glide: a jump moves, a manipulation does not
 
-Date: 2026-08-19. Status: **specified, not built**. Andreas's idea.
+Date: 2026-08-19. Status: **built** the same day. Andreas's idea.
 
 ## Why
 
@@ -219,7 +219,8 @@ elapsed time as an argument:
 ## Open questions, to settle in use rather than on paper
 
 - **140ms is a guess.** It wants tuning against a real board on a real
-  terminal, including over SSH where each frame is a round trip.
+  terminal, including over SSH where each frame is a round trip. Felt right on
+  first use; left alone.
 - **Whether a short hop should glide at all.** Moving a third of a screen may
   read better as a cut. A distance threshold is easy to add later and
   impossible to pick sensibly without using it first.
