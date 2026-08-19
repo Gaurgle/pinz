@@ -95,6 +95,12 @@ What the renderer settled on (`crates/pinz-tui`):
   except mid-drag, which would otherwise rewrite a pin's file on every
   mouse-move. Git sync stays at the edges (pull on open, commit and push on
   quit), so a gesture never mints a commit. **Done.**
+- The loop **blocks** for input rather than running a frame clock, which is
+  what keeps pinz at zero CPU sitting open on a desk. The one exception is
+  while the camera is travelling to a jump's destination, when it polls at a
+  frame budget: idle still means idle, because idle means nothing is moving.
+  Elapsed time is handed to `App`, never read by it. **Done**, see
+  `design/specs/2026-08-19-camera-glide.md`.
 - Not `ratatui-3d`: the board is fundamentally 2D; 3D buys nothing here.
 
 ## The seam: storage is swappable
