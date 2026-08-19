@@ -160,6 +160,13 @@ pub struct App {
     /// Currently selected note (by id), if any.
     selected: Option<u64>,
     mode: Mode,
+    /// Whether the key list is up.
+    ///
+    /// A flag beside the mode rather than a fourth [`Mode`], because help is
+    /// something you put *over* what you were doing: closing it has to put you
+    /// back in the note you were editing, and a mode you replaced cannot do
+    /// that.
+    help: bool,
     /// The live note editor, present only while in [`Mode::Edit`].
     editor: Option<TextEditor>,
     drag: Option<Drag>,
@@ -229,6 +236,7 @@ impl App {
             },
             selected: None,
             mode: Mode::Nav,
+            help: false,
             editor: None,
             drag: None,
             viewport: Rect::default(),
@@ -369,6 +377,11 @@ impl App {
         self.drag.is_some()
     }
 
+    /// Whether the key list is up, for the renderer to draw over everything.
+    pub fn help(&self) -> bool {
+        self.help
+    }
+
     /// The open prompt, for the renderer to draw. `Some` only in [`Mode::Prompt`].
     pub fn prompt(&self) -> Option<&Prompt> {
         self.prompt.as_ref()
@@ -488,6 +501,21 @@ impl App {
     fn key(&mut self, key: KeyEvent) {
         // Whatever the last event had to say, this one supersedes it.
         self.status = None;
+        // The key that dismisses the list is spent doing so: pressing ? and
+        // then n should not leave you holding a note you never asked for.
+        // Checked before everything else, ctrl-c included, so there is exactly
+        // one thing any key can mean while the list is up.
+        if self.help {
+            self.help = false;
+            return;
+        }
+        // F1 rather than only `?`, because in a note `?` is a character you are
+        // trying to type. No terminal sends F1 as text, so it is the one key
+        // that can mean the same thing in every mode.
+        if key.code == KeyCode::F(1) {
+            self.help = true;
+            return;
+        }
         if self.copy_chord(key) {
             return;
         }
@@ -500,6 +528,7 @@ impl App {
         match key.code {
             KeyCode::Char('r') if ctrl => self.redo_step(),
             KeyCode::Char('u') => self.undo_step(),
+            KeyCode::Char('?') => self.help = true,
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.selected = None,
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_at_center(true),
@@ -705,6 +734,9 @@ impl App {
 
     fn paste(&mut self, text: String) {
         self.status = None;
+        if self.help {
+            return;
+        }
         match self.mode {
             Mode::Edit => {
                 if let Some(editor) = self.editor.as_mut() {
@@ -901,6 +933,11 @@ impl App {
 
     fn mouse(&mut self, m: MouseEvent) {
         self.status = None;
+        // The list covers the board, so a click lands on something you cannot
+        // see. Closing it is a key press.
+        if self.help {
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollUp => self.zoom_at(true, m.column, m.row),
             MouseEventKind::ScrollDown => self.zoom_at(false, m.column, m.row),
@@ -1391,6 +1428,61 @@ mod tests {
             state: KeyEventState::NONE,
         });
         assert!(b.should_quit());
+    }
+
+    #[test]
+    fn question_mark_opens_the_key_list_and_any_key_closes_it() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('?')));
+        assert!(a.help(), "? opens the key list");
+
+        let before = a.boards().to_vec();
+        a.on_key(key(KeyCode::Char('n')));
+        assert!(!a.help(), "any key closes it");
+        assert_eq!(
+            a.boards(),
+            before.as_slice(),
+            "and that key does nothing else"
+        );
+    }
+
+    #[test]
+    fn f1_opens_the_key_list_without_disturbing_the_note() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        for c in "hi".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        a.on_key(key(KeyCode::F(1)));
+        assert!(a.help(), "f1 reaches the list from inside a note");
+
+        a.on_key(key(KeyCode::Esc));
+        assert!(!a.help());
+        assert_eq!(a.mode(), Mode::Edit, "back in the note you were writing");
+        assert_eq!(
+            a.editor().unwrap().text(),
+            "new notehi",
+            "with the text untouched"
+        );
+    }
+
+    #[test]
+    fn a_question_mark_while_editing_is_just_a_character() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Char('?')));
+        assert!(!a.help());
+        assert_eq!(a.editor().unwrap().text(), "new note?");
+    }
+
+    #[test]
+    fn the_mouse_does_nothing_while_the_key_list_is_up() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('?')));
+        let before = a.boards().to_vec();
+        a.on_mouse(mouse_down(10, 10));
+        assert!(a.help(), "a click is not a way out either");
+        assert_eq!(a.boards(), before.as_slice());
     }
 
     #[test]

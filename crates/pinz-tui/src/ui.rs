@@ -49,6 +49,135 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(prompt) = app.prompt() {
         draw_prompt(frame, rows[2], prompt, &theme);
     }
+    // Over the whole frame, not just the board: the list is taller than the
+    // board area on a short terminal, and it is what the footer points at, so
+    // covering the footer costs nothing.
+    if app.help() {
+        draw_help(frame, area, &theme);
+    }
+}
+
+/// Width of one column of the key list: the widest key, a space, its label.
+const HELP_COL: u16 = 34;
+
+/// Where the groups split between the two columns. One column would run to
+/// about 35 rows, which does not fit an 80x24 terminal.
+const HELP_SPLIT: usize = 3;
+
+/// Every binding pinz has, and the only place they are written down - the
+/// footer carries news, not a key list. Grouped by what you are doing rather
+/// than by which match arm binds them.
+const HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "board",
+        &[
+            ("scroll / + -", "zoom"),
+            ("drag", "pan the board"),
+            ("← ↑ → ↓", "pan a step"),
+            ("esc", "clear selection"),
+        ],
+    ),
+    (
+        "pins",
+        &[
+            ("n", "new pin"),
+            ("e / enter", "edit it"),
+            ("y", "copy it whole"),
+            ("c / C", "color, backwards"),
+            ("d / x / del", "delete it"),
+            ("drag", "move it"),
+            ("u / ctrl+r", "undo, redo"),
+        ],
+    ),
+    (
+        "worlds",
+        &[
+            ("tab / shift+tab", "next, previous"),
+            ("1 - 9", "jump to a world"),
+            ("w / +", "new world"),
+            ("drag onto a tab", "send a pin there"),
+        ],
+    ),
+    (
+        "editing a pin",
+        &[
+            ("line 1", "is the title"),
+            ("enter", "new line"),
+            ("shift + ← →", "select"),
+            ("alt + ← →", "by word"),
+            ("ctrl+a", "select all"),
+            ("ctrl+c / ctrl+x", "copy, cut"),
+            ("ctrl+⌫", "delete a word"),
+            ("ctrl+u", "clear the line"),
+            ("esc", "save and close"),
+        ],
+    ),
+    (
+        "app",
+        &[
+            ("t / T", "theme, backwards"),
+            ("? / F1", "this list"),
+            ("q / ctrl+c", "quit, pushing pins"),
+        ],
+    ),
+];
+
+/// The key list: two columns in one centered panel.
+fn draw_help(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let left = help_lines(&HELP[..HELP_SPLIT], theme);
+    let right = help_lines(&HELP[HELP_SPLIT..], theme);
+
+    let width = (HELP_COL * 2 + 4).min(area.width);
+    let height = (left.len().max(right.len()) as u16 + 2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Span::styled(
+            " keys ",
+            Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " any key closes ",
+            Style::new().fg(theme.overlay0),
+        ))
+        .style(Style::new().bg(theme.mantle));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let cols = Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(inner);
+    frame.render_widget(Paragraph::new(left), cols[0]);
+    frame.render_widget(Paragraph::new(right), cols[1]);
+}
+
+/// One column of the key list: a group title, then `key  what it does`.
+fn help_lines(groups: &[(&str, &[(&str, &str)])], theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (title, entries) in groups {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(Span::styled(
+            title.to_string(),
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )));
+        for (keys, what) in *entries {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{keys:<15} "), Style::new().fg(theme.text)),
+                Span::styled(what.to_string(), Style::new().fg(theme.overlay1)),
+            ]));
+        }
+    }
+    lines
 }
 
 /// A small centered dialog. Deliberately a stop-and-answer moment rather than a
@@ -102,7 +231,9 @@ fn draw_prompt(frame: &mut Frame, area: Rect, prompt: &Prompt, theme: &Theme) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(10)]).split(area);
+    // The right column carries state: the theme name, then the zoom dots. Wide
+    // enough for the longest theme name plus the ladder.
+    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(26)]).split(area);
 
     let brand = Line::from(vec![
         Span::styled(
@@ -123,7 +254,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // the dots say how far in you are, and what the levels are called is the
     // renderer's business, not something to spend header width on.
     let idx = app.zoom().index();
-    let mut spans = Vec::new();
+    let mut spans = vec![
+        Span::styled(theme.name, Style::new().fg(theme.overlay1)),
+        Span::raw("  "),
+    ];
     for i in 0..ZoomLevel::ALL.len() {
         let (glyph, color) = if i <= idx {
             ("●", theme.accent)
@@ -666,45 +800,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
+    // One pointer, not a key list: the panel behind `?` is where the bindings
+    // live, and this row's real job is news - a copy, a warning, a drop target.
     let hint = match app.mode() {
-        Mode::Prompt => Line::from(vec![
-            Span::styled(
-                "naming a world",
-                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
-            key_hint("enter", "create", theme.overlay1),
-            key_hint("esc", "cancel", theme.overlay1),
-        ]),
+        // The prompt box already draws its own enter/esc line, a row above.
+        Mode::Prompt => Line::from(vec![key_hint("F1", "keys", theme.overlay1)]),
+        // `?` is a character you may be trying to type, so editing gets F1.
+        // Esc-saves stays: it is the one editing rule nobody guesses.
         Mode::Edit => Line::from(vec![
-            Span::styled(
-                "editing",
-                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
-            Span::styled("line 1 is the title", Style::new().fg(theme.overlay0)),
-            Span::styled("  ·  ", Style::new().fg(theme.overlay0)),
-            key_hint("enter", "newline", theme.overlay1),
-            key_hint("↑↓←→", "move", theme.overlay1),
-            key_hint("alt+←→", "word", theme.overlay1),
-            key_hint("shift+←→", "select", theme.overlay1),
-            key_hint("ctrl+c", "copy", theme.overlay1),
-            key_hint("ctrl+⌫", "del word", theme.overlay1),
-            key_hint("esc", "save", theme.overlay1),
+            key_hint("F1", "keys", theme.overlay1),
+            Span::styled("·", Style::new().fg(theme.overlay0)),
+            key_hint("esc", "saves", theme.overlay1),
         ]),
-        Mode::Nav => Line::from(vec![
-            key_hint("scroll/±", "zoom", theme.overlay1),
-            key_hint("drag", "move/pan", theme.overlay1),
-            key_hint("n", "new", theme.overlay1),
-            key_hint("e", "edit", theme.overlay1),
-            key_hint("y", "copy", theme.overlay1),
-            key_hint("c", "color", theme.overlay1),
-            key_hint("d", "del", theme.overlay1),
-            key_hint("tab", "world", theme.overlay1),
-            key_hint("w", "+world", theme.overlay1),
-            key_hint("t", &format!("theme:{}", theme.name), theme.overlay1),
-            key_hint("q", "quit", theme.overlay1),
-        ]),
+        Mode::Nav => Line::from(vec![key_hint("?", "keys", theme.overlay1)]),
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::new().bg(theme.mantle)),
@@ -759,11 +867,19 @@ mod tests {
         assert!(text.contains("welcome"), "note title missing:\n{text}");
     }
 
+    /// One row of a rendered frame, for asserting *where* something is drawn
+    /// rather than only that it appears somewhere.
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
     #[test]
-    fn footer_shows_the_active_theme_name() {
+    fn the_header_shows_the_active_theme_name() {
+        // State, not a hint: it belongs where the zoom level already lives, and
+        // `t` would otherwise cycle blind between themes of a similar tone.
         let buf = render_with(Some("nord"));
-        let text = buffer_text(&buf);
-        assert!(text.contains("Nord"), "active theme name missing:\n{text}");
+        let header = row_text(&buf, 0);
+        assert!(header.contains("Nord"), "not in the header row: {header:?}");
     }
 
     #[test]
@@ -1074,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_offers_the_copy_keys_in_both_modes() {
+    fn the_footer_points_at_the_key_list_instead_of_being_one() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let press = |c| KeyEvent::new(c, KeyModifiers::NONE);
         let mut store = MemoryStore::seeded();
@@ -1083,19 +1199,65 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("? keys"), "nav should point at it:\n{text}");
         assert!(
-            text.contains("y copy"),
-            "nav should offer the yank:\n{text}"
+            !text.contains("y copy"),
+            "and not list keys itself:\n{text}"
         );
 
         app.on_key(press(KeyCode::Char('n'))); // into the editor
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
+        assert!(text.contains("F1 keys"), "edit points at it too:\n{text}");
         assert!(
-            text.contains("select"),
-            "edit should offer selection:\n{text}"
+            text.contains("esc saves"),
+            "and keeps the one editing rule nobody guesses:\n{text}"
         );
-        assert!(text.contains("copy"), "edit should offer copy:\n{text}");
+    }
+
+    #[test]
+    fn the_key_list_fits_a_standard_terminal_and_survives_a_tiny_one() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // 80x24 is the floor worth designing for; the panel is two columns
+        // precisely so it fits there rather than running off the bottom.
+        for (w, h) in [(80, 24), (40, 10), (8, 3)] {
+            let mut store = MemoryStore::seeded();
+            let mut app = App::new(store.load().unwrap());
+            app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            if (w, h) == (80, 24) {
+                let text = buffer_text(&terminal.backend().buffer().clone());
+                assert!(
+                    text.contains("any key closes") && text.contains("q / ctrl+c"),
+                    "the panel is clipped at 80x24:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_key_list_covers_every_group() {
+        // The footer stopped teaching keys, so this panel is the only place
+        // they are written down. Missing one means it is bound and unfindable.
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut app = App::new(store.load().unwrap());
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+
+        for wanted in [
+            "board", "pins", "worlds", "editing", // one per group
+            "ctrl+r", "1 - 9", "ctrl+a", "t / T", "? / F1", // one binding each
+            "any key closes",
+        ] {
+            assert!(
+                text.contains(wanted),
+                "{wanted:?} missing from the key list:\n{text}"
+            );
+        }
     }
 
     #[test]
@@ -1118,7 +1280,7 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
         assert!(!text.contains("copied"), "status should clear:\n{text}");
-        assert!(text.contains("y copy"), "hints should come back:\n{text}");
+        assert!(text.contains("? keys"), "the footer should come back:\n{text}");
     }
 
     /// The whole path in one test: real key events into [`App`], a real frame
