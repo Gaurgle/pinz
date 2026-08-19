@@ -977,9 +977,17 @@ impl App {
             .map(|(_, id)| id)
     }
 
-    /// Scroll the least that puts a pin fully on screen, and not at all if it
-    /// already is. Stepping between pins you can see should leave the board
-    /// where it is; only one off the edge is worth moving the board for.
+    /// Put a pin on screen if it is not already, by centring it.
+    ///
+    /// A pin you can already see does not move the board at all: stepping
+    /// between neighbours should stay calm, and you keep your sense of where
+    /// you are.
+    ///
+    /// When the board *does* have to move it centres, rather than scrolling the
+    /// least that makes the pin fit. Minimum scroll leaves the pin flush against
+    /// whichever edge it came in from, so where a pin ended up was a function of
+    /// which direction you approached it - arriving at the same pin from the
+    /// left and from the right put it in opposite corners.
     fn bring_into_view(&mut self, id: u64) {
         let Some((x, y)) = self
             .active_board()
@@ -993,22 +1001,15 @@ impl App {
         let (sx, sy) = self.view().scale();
         let view_w = self.viewport.width as f64 / sx;
         let view_h = self.viewport.height as f64 / sy;
-        let mut origin = self.camera.origin;
-        // Far edge first, then the near one, so a pin bigger than the viewport
-        // settles showing its top-left rather than its bottom-right.
-        if x + NOTE_W > origin.x + view_w {
-            origin.x = x + NOTE_W - view_w;
+        let origin = self.camera.origin;
+        let on_screen = x >= origin.x
+            && x + NOTE_W <= origin.x + view_w
+            && y >= origin.y
+            && y + NOTE_H <= origin.y + view_h;
+        if on_screen {
+            return;
         }
-        if x < origin.x {
-            origin.x = x;
-        }
-        if y + NOTE_H > origin.y + view_h {
-            origin.y = y + NOTE_H - view_h;
-        }
-        if y < origin.y {
-            origin.y = y;
-        }
-        self.glide_to(origin);
+        self.center_on_note(id);
     }
 
     fn edit_key(&mut self, key: KeyEvent) {
@@ -1835,6 +1836,40 @@ mod tests {
             shown,
             "a retarget must not lurch back to where the last one began"
         );
+    }
+
+    #[test]
+    fn a_pin_fetched_from_off_screen_lands_in_the_middle() {
+        // Scrolling the least that made a pin fit put it flush against the edge
+        // it came in from, so where a pin ended up depended on which way you
+        // approached it - and it was never the middle.
+        let mut a = app_with_pins(PINS);
+        for _ in 0..3 {
+            a.on_key(key(KeyCode::Char('+'))); // document zoom, so pins do not all fit
+        }
+        a.on_key(shift(KeyCode::Right)); // land on pin 1
+        a.tick(GLIDE);
+
+        let (mid_x, mid_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
+        for (step, from) in [
+            (KeyCode::Right, "the left"),
+            (KeyCode::Left, "the right"),
+            (KeyCode::Down, "above"),
+            (KeyCode::Up, "below"),
+        ] {
+            a.on_key(shift(step));
+            a.tick(GLIDE);
+            let id = a.selected().unwrap();
+            let (cx, cy) = pin_cell(&a, id);
+            assert!(
+                (cx - mid_x).abs() < 1.0,
+                "pin {id} approached from {from} landed at x={cx}, wanted {mid_x}"
+            );
+            assert!(
+                (cy - mid_y).abs() < 1.0,
+                "pin {id} approached from {from} landed at y={cy}, wanted {mid_y}"
+            );
+        }
     }
 
     #[test]
