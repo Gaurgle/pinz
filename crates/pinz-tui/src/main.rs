@@ -394,11 +394,12 @@ fn run_app(opts: Options) -> io::Result<()> {
             return Ok(());
         }
     }
+    // Report what git did, in the same shape the subcommands use. The push on
+    // quit is the one thing that happens off-screen and can quietly not happen
+    // - no remote, nothing staged, a rejected push - so staying silent on
+    // success leaves you guessing whether the other machine has your pins.
     if let (Some(sync), true) = (&sync, may_push && save_error.is_none()) {
-        let pushed = sync.push("pinz: update pins");
-        if pushed.is_stopped() {
-            eprintln!("!! {}", pushed.message());
-        }
+        report("push", sync.push("pinz: update pins"));
     }
     // Now that the terminal is ours again, the startup stop also lands in
     // scrollback - the footer warning disappeared with the alternate screen.
