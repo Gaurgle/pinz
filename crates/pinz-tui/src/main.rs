@@ -21,6 +21,7 @@ mod wrap;
 use std::io::{self, Stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use app::App;
 use pinz_core::{
@@ -444,20 +445,42 @@ fn restore() -> io::Result<()> {
     disable_raw_mode()
 }
 
-/// Draw, then block for the next event and apply it. No animation loop: the
-/// board only changes in response to input, so a redraw per event is enough and
-/// keeps the app idle at zero CPU.
+/// A frame budget for the one thing that animates: the camera glide.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Draw, then wait for the next event and apply it.
+///
+/// The loop **blocks** for input, which is what keeps pinz at zero CPU sitting
+/// open on a desk: the board changes only in response to input, so a redraw per
+/// event is enough. The one exception is while the camera is travelling to a
+/// jump's destination ([`App::animating`]), when it polls at a frame budget and
+/// advances the animation instead. Idle still means idle, because idle means
+/// nothing is moving. See `design/specs/2026-08-19-camera-glide.md`.
 ///
 /// Returns a save error, if one happened, for the caller to print once the
 /// terminal is back - nothing may be written to the screen while the TUI owns it.
 fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<Option<String>> {
     let mut saved = app.revision();
+    let mut last = Instant::now();
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
         if app.should_quit() {
             return Ok(None);
         }
-        apply(app, event::read()?);
+        if app.animating() {
+            if event::poll(FRAME)? {
+                apply(app, event::read()?);
+            }
+            let now = Instant::now();
+            app.tick(now - last);
+            last = now;
+        } else {
+            apply(app, event::read()?);
+            // Re-stamped *after* the blocking read, never before: otherwise the
+            // first tick of a glide is handed however long you sat looking at
+            // the board, and it finishes in one frame - a cut with extra steps.
+            last = Instant::now();
+        }
         deliver_copy(&mut io::stdout(), app);
         // Persist as you work, but never mid-gesture: a drag would otherwise
         // rewrite the pin's file on every mouse-move. A read-only session
