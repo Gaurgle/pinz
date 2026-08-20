@@ -143,7 +143,9 @@ carries news instead: what a drag is about to do, what was copied, why a board
 is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
-detail, **drag a note** to move it, **drag the board** to pan (arrow keys too),
+detail (scroll zooms about the cursor; `+`/`-` about the selected pin, which
+ends up centered, or the middle of the view when nothing is selected), **drag a
+note** to move it, **drag the board** to pan (arrow keys too),
 `Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
 strip for a new world (it stays out of your way: the tab appears, you do not
 move to it, and nine is the limit because `1`-`9` are how you get there), `W` to
