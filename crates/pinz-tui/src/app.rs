@@ -924,14 +924,21 @@ impl App {
     /// board; that is the same pan margin every other camera move obeys, not a
     /// rule of its own.
     fn center_on_note(&mut self, id: u64) {
-        let Some((cx, cy)) = self.note_center(id) else {
+        let Some(origin) = self.centered_origin(id) else {
             return;
         };
+        self.glide_to(origin);
+    }
+
+    /// The origin that puts one pin in the middle of the viewport, at the
+    /// current zoom. Unclamped; every caller runs it through `clamp_origin`.
+    fn centered_origin(&self, id: u64) -> Option<WorldPoint> {
+        let (cx, cy) = self.note_center(id)?;
         let (sx, sy) = self.view().scale();
-        self.glide_to(WorldPoint {
+        Some(WorldPoint {
             x: cx - (self.viewport.width as f64 / 2.0) / sx,
             y: cy - (self.viewport.height as f64 / 2.0) / sy,
-        });
+        })
     }
 
     fn note_center(&self, id: u64) -> Option<(f64, f64)> {
@@ -1581,9 +1588,43 @@ impl App {
         self.clamp_origin();
     }
 
+    /// One zoom step from the keyboard.
+    ///
+    /// With a pin selected the zoom is *about that pin*: it ends up in the
+    /// middle of the viewport, because `+` on a selection means "look closer at
+    /// this one" and not "look closer at whatever the middle of the screen
+    /// happened to hold". With nothing selected there is no such subject, so
+    /// the middle of the view is the focal point.
     fn zoom_at_center(&mut self, zoom_in: bool) {
-        let (col, row) = self.viewport_center();
-        self.zoom_at(zoom_in, col, row);
+        match self.selected {
+            Some(id) => self.zoom_onto_note(zoom_in, id),
+            None => {
+                let (col, row) = self.viewport_center();
+                self.zoom_at(zoom_in, col, row);
+            }
+        }
+    }
+
+    /// Zoom one step and leave `id` centred. The pan cuts along with the zoom
+    /// for the same reason `zoom_at` kills a glide: a board still travelling
+    /// while the scale jumps under it reads as a lurch.
+    fn zoom_onto_note(&mut self, zoom_in: bool, id: u64) {
+        let target = if zoom_in {
+            self.camera.zoom.zoomed_in()
+        } else {
+            self.camera.zoom.zoomed_out()
+        };
+        if target == self.camera.zoom {
+            return;
+        }
+        self.glide = None;
+        self.camera.zoom = target;
+        // After the zoom: the centred origin depends on the new scale.
+        let Some(origin) = self.centered_origin(id) else {
+            return;
+        };
+        self.camera.origin = origin;
+        self.clamp_origin();
     }
 
     fn viewport_center(&self) -> (u16, u16) {
@@ -2066,6 +2107,54 @@ mod tests {
         let (want_x, want_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
         assert!((cx - want_x).abs() < 1.0, "off centre horizontally: {cx}");
         assert!((cy - want_y).abs() < 1.0, "off centre vertically: {cy}");
+    }
+
+    #[test]
+    fn zooming_with_a_pin_selected_centres_it() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1
+        a.tick(GLIDE);
+        for _ in 0..6 {
+            a.on_key(key(KeyCode::Right)); // shove it well off centre
+        }
+        let (before, _) = pin_cell(&a, 1);
+        assert!(before < 20.0, "setup: the pin should be off centre, at {before}");
+
+        a.on_key(key(KeyCode::Char('+')));
+        let (cx, cy) = pin_cell(&a, 1);
+        let (want_x, want_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
+        assert!((cx - want_x).abs() < 1.0, "off centre horizontally: {cx}");
+        assert!((cy - want_y).abs() < 1.0, "off centre vertically: {cy}");
+    }
+
+    #[test]
+    fn zooming_out_keeps_the_selected_pin_centred() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(shift(KeyCode::Right)); // pin 1
+        a.tick(GLIDE);
+        for _ in 0..6 {
+            a.on_key(key(KeyCode::Down));
+        }
+        a.on_key(key(KeyCode::Char('-')));
+        let (cx, cy) = pin_cell(&a, 1);
+        let (want_x, want_y) = (VIEWPORT.width as f64 / 2.0, VIEWPORT.height as f64 / 2.0);
+        assert!((cx - want_x).abs() < 1.0, "off centre horizontally: {cx}");
+        assert!((cy - want_y).abs() < 1.0, "off centre vertically: {cy}");
+    }
+
+    #[test]
+    fn zooming_with_nothing_selected_holds_the_middle_of_the_view() {
+        let mut a = app_with_pins(PINS);
+        for _ in 0..6 {
+            a.on_key(key(KeyCode::Right));
+        }
+        assert!(a.selected().is_none());
+        let (col, row) = (VIEWPORT.x + VIEWPORT.width / 2, VIEWPORT.y + VIEWPORT.height / 2);
+        let before = View::new(a.camera(), VIEWPORT).world_at(col, row);
+        a.on_key(key(KeyCode::Char('+')));
+        let after = View::new(a.camera(), VIEWPORT).world_at(col, row);
+        assert!((after.x - before.x).abs() < 1.0, "the focal point moved: {after:?}");
+        assert!((after.y - before.y).abs() < 1.0, "the focal point moved: {after:?}");
     }
 
     /// A board list already at the world limit, for testing the cap.
