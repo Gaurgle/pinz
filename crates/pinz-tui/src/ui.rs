@@ -245,7 +245,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  — terminal bulletin board",
+            format!("  v{}", crate::VERSION),
             Style::new().fg(theme.overlay1),
         ),
     ]);
@@ -900,6 +900,19 @@ mod tests {
         let buf = render_with(Some("nord"));
         let header = row_text(&buf, 0);
         assert!(header.contains("Nord"), "not in the header row: {header:?}");
+    }
+
+    #[test]
+    fn the_header_shows_the_crate_version() {
+        // The tagline said nothing a user did not already know; the version is
+        // the one thing the header can tell them that they cannot see.
+        let buf = render_with(None);
+        let header = row_text(&buf, 0);
+        let expected = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            header.contains(&expected),
+            "{expected} not in the header row: {header:?}"
+        );
     }
 
     #[test]
