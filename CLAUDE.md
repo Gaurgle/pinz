@@ -24,7 +24,11 @@ where the session runs.
   `cleanup:`), first line under 72 characters. Body is for the why, not the what.
 - **No `Co-Authored-By` lines.** Ever.
 - **Present the full `git commit -m "..."` command for review; do not commit.**
-  The human commits and pushes.
+  The human commits and pushes. The one exception is **"ship it"**: commit and
+  push, plus a PR where this repo's flow calls for one. It never merges, tags,
+  releases or deploys, and never ships a red build. The **Ship policy** line
+  below says what it does here; with no such line, push the current branch and
+  never `main`.
 - **Never edit, delete or disable a test to make code pass.** Fix the code. If a
   test looks wrong, stop and say so rather than changing it.
 - **Ask before** adding or removing dependencies, changing schema or API
@@ -58,6 +62,8 @@ covers.
 ## Working conventions
 
 - **Feature branch and a PR into `main`.** Not direct to main, even solo.
+- **Ship policy:** commit, push the branch, open or update the PR. Never push
+  to `main` and never merge; the PR is the review surface and you merge it.
 - Test-first. Every new function gets a failing test before it gets an
   implementation.
 - Formatting is **hand-maintained, not `rustfmt`**. `cargo fmt` reformats every
