@@ -264,10 +264,36 @@ dragging a note doesn't churn the history.
 
 Setup lives under [Install](#install); this is what sync does once it is running.
 
-`~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits and
-pushes when you quit, printing one line saying what git did (`ok push: committed and
-pushed`, `-- push: nothing to sync`); `pinz sync` does both on demand. It only ever touches its own repo, so it can
-never sweep up or be blocked by work in progress anywhere else.
+`~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits
+and pushes when you quit; `pinz sync` does both on demand. It only ever touches
+its own repo, so it can never sweep up or be blocked by work in progress
+anywhere else.
+
+Quitting tears down the alternate screen and snaps your old scrollback back, so
+whatever pinz did lands on top of whatever was already there. It arrives as one
+block, under a rule drawn across the terminal:
+
+```
+─── pinz ──────────────────────────────────────────────
+  ~/pinz-board - 1 uncommitted change(s)
+  ✓ commit  committed local pins
+  · pull    already up to date
+  ✓ push    pushed to Gaurgle/pinz-board
+```
+
+The rule carries the name, so the lines under it do not have to. Everything in
+the block is indented, which is what marks it as pinz's even in a screenshot or
+a pipe with no color. Informational lines are blue; step lines are colored by
+what happened - green `✓` done, grey `·` nothing to do, red `✗` stopped - and
+the message is git's own wording, folded up from its stderr and left plain.
+
+A push that moved something names where it went, so two machines pointed at
+different remotes cannot look alike. The name is `origin` shortened the way
+`gh` writes one; a remote that is a directory keeps the last two segments of
+its path.
+
+Set `NO_COLOR` to turn the color off. Color is dropped and the rule falls back
+to a fixed width when the output is not a terminal.
 
 When the same pin changed on both machines, pinz settles what it safely can:
 position and color changes merge on their own (moving a pin on one machine and
