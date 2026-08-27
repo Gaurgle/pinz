@@ -140,6 +140,15 @@ impl Sync {
             .unwrap_or(false)
     }
 
+    /// Where a push goes, as git has it written down, or `None` with no remote.
+    ///
+    /// A fact rather than a phrasing: the raw URL, for a caller to shorten or
+    /// print however suits it.
+    pub fn remote_url(&self) -> Option<String> {
+        let out = self.git(&["remote", "get-url", "origin"])?;
+        (out.ok && !out.stdout.is_empty()).then_some(out.stdout)
+    }
+
     fn has_upstream(&self) -> bool {
         self.git(&["rev-parse", "--abbrev-ref", "@{u}"])
             .map(|r| r.ok)
@@ -950,5 +959,26 @@ mod tests {
         assert!(!status.contains("rebase"), "left mid-rebase:\n{status}");
         let kept = fs::read_to_string(b.path().join("ideas/shared.md")).unwrap();
         assert_eq!(kept, "# edited on b\n", "local work must survive the stop");
+    }
+
+    #[test]
+    fn a_repo_with_no_remote_has_nowhere_to_say_it_pushed_to() {
+        let t = Temp::new("nourl");
+        init_repo(t.path());
+        assert_eq!(Sync::new(t.path()).remote_url(), None);
+    }
+
+    #[test]
+    fn the_push_destination_is_whatever_origin_points_at() {
+        let t = Temp::new("url");
+        init_repo(t.path());
+        assert!(git_in(
+            t.path(),
+            &["remote", "add", "origin", "git@github.com:someone/pinz-board.git"]
+        ));
+        assert_eq!(
+            Sync::new(t.path()).remote_url().as_deref(),
+            Some("git@github.com:someone/pinz-board.git")
+        );
     }
 }

@@ -18,9 +18,10 @@ mod ui;
 mod view;
 mod wrap;
 
-use std::io::{self, Stdout};
+use std::io::{self, IsTerminal, Stdout};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use app::App;
@@ -34,7 +35,7 @@ use ratatui::crossterm::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyEventKind,
     },
-    execute,
+    execute, terminal,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::Terminal;
@@ -67,7 +68,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> io::Result<()> {
     let opts = Options::parse(std::env::args().skip(1));
-    match opts.command {
+    let result = match opts.command {
         Command::Help => {
             print_help();
             Ok(())
@@ -81,7 +82,9 @@ fn main() -> io::Result<()> {
         Command::Pull => git_command(Command::Pull),
         Command::Push => git_command(Command::Push),
         Command::Run => run_app(opts),
-    }
+    };
+    close_block();
+    result
 }
 
 // ---- command line ----
@@ -228,11 +231,11 @@ fn git_command(command: Command) -> io::Result<()> {
     // A status is only current once we have asked the remote.
     let fetched = sync.fetch();
     let status = sync.status();
-    println!("   {} - {}", root.display(), status.summary());
+    detail(&format!("{} - {}", root.display(), status.summary()));
     if !status.has_remote {
-        println!("{}", remote_advice(&root, created));
+        detail(&remote_advice(&root, created));
     } else if let SyncOutcome::Idle(why) = &fetched {
-        println!("   (remote not reachable: {why})");
+        detail(&format!("(remote not reachable: {why})"));
     }
 
     if command == Command::Status {
@@ -257,12 +260,12 @@ fn git_command(command: Command) -> io::Result<()> {
         let pulled = sync.pull();
         report("pull", &pulled);
         if pulled.is_stopped() {
-            eprintln!("\nstopping here: resolve the conflict above before pushing.");
+            detail("stopping here: resolve the conflict above before pushing.");
             return Ok(());
         }
     }
     if wants_push {
-        report("push", sync.push("pinz: update pins"));
+        report_push(&sync, "pinz: update pins");
     }
     Ok(())
 }
@@ -279,30 +282,268 @@ fn remote_advice(root: &Path, created: bool) -> String {
     let root = root.display().to_string();
     let mut lines = Vec::new();
     if created {
-        lines.push(format!("   {root} is new and holds one blank pin."));
+        lines.push(format!("{root} is new and holds one blank pin."));
     }
-    lines.push("   no remote yet, so nothing syncs. two ways forward:".into());
-    lines.push("     your pins already live in a repo, pushed from another machine?".into());
-    lines.push("     clone it. do not add a remote here - the histories are unrelated".into());
-    lines.push("     and git will refuse to merge them:".into());
+    lines.push("no remote yet, so nothing syncs. two ways forward:".into());
+    lines.push("  your pins already live in a repo, pushed from another machine?".into());
+    lines.push("  clone it. do not add a remote here - the histories are unrelated".into());
+    lines.push("  and git will refuse to merge them:".into());
+    lines.push(format!("      mv {root} {root}.bak && git clone <url> {root}"));
+    lines.push("  this is your first machine? create the remote:".into());
     lines.push(format!(
-        "         mv {root} {root}.bak && git clone <url> {root}"
-    ));
-    lines.push("     this is your first machine? create the remote:".into());
-    lines.push(format!(
-        "         cd {root} && gh repo create pinz-board --private --source=. --push"
+        "      cd {root} && gh repo create pinz-board --private --source=. --push"
     ));
     lines.join("\n")
 }
 
+// ANSI escapes, raw rather than a color crate: these lines print to a plain
+// stdout once the alternate screen is gone, so none of crossterm's terminal
+// state applies and a handful of constants are cheaper than a dependency.
+// The bright variants (9x) rather than the plain ones (3x): this block lands
+// under a dark terminal more often than not, and the dim originals read as
+// switched off rather than quiet.
+const RESET: &str = "\u{1b}[0m";
+const BOLD: &str = "\u{1b}[1m";
+const DIM: &str = "\u{1b}[2m";
+const WHITE: &str = "\u{1b}[37m";
+const BLUE: &str = "\u{1b}[94m";
+const CYAN: &str = "\u{1b}[36m";
+const GREEN: &str = "\u{1b}[92m";
+const RED: &str = "\u{1b}[91m";
+
+// Everything below draws one block: a labelled rule, then indented lines under
+// it. Quitting the TUI tears down the alternate screen and snaps the old
+// scrollback back, so these lines land on top of whatever was already there -
+// a build, a git log, another shell. The block has to say where it starts and
+// whose it is without being read.
+
+/// The rule that opens the block, drawn across the terminal. Anything narrower
+/// is a decoration; a divider divides.
+const RULE: &str = "\u{2500}";
+
+/// Rule drawn before the label, so it reads as a rule with a name on it rather
+/// than a heading with a line after it.
+const RULE_LEAD: usize = 3;
+
+/// Page width when there is no terminal to measure - piped, redirected, or a
+/// terminal that will not say.
+const FALLBACK_WIDTH: usize = 64;
+
+/// Whose block this is. On the rule, so it does not have to be on every line.
+const LABEL: &str = "pinz";
+
+/// Every line inside the block is indented. Color says a lot, but indentation
+/// still says "this is one block" in a screenshot, a pipe, or a log.
+const INDENT: &str = "  ";
+
+/// Step names are padded to a column so the messages line up under each other
+/// and the block scans as a table. Six holds the longest of them (`commit`).
+const STEP_COLUMN: usize = 6;
+
+/// Has the user opted out of color?
+///
+/// `NO_COLOR` is the cross-tool convention, and honouring it is the difference
+/// between a preference and an imposition.
+fn colors_opted_out() -> bool {
+    std::env::var_os("NO_COLOR").is_some()
+}
+
+/// Whether to paint `stream`: a terminal whose user has not opted out.
+///
+/// The terminal check is what keeps the escapes out of `pinz sync > log`.
+fn color_on(stream: &impl IsTerminal) -> bool {
+    !colors_opted_out() && stream.is_terminal()
+}
+
+/// The opening rule: `\u{2500}\u{2500}\u{2500} pinz \u{2500}\u{2500}\u{2500}...` out to `width`.
+///
+/// The rule is neutral and the name is blue, so the eye lands on the name and
+/// the line stays furniture. A width too small for both keeps the label and loses the
+/// rule: the name is the part that carries meaning.
+fn divider_line(width: usize, color: bool) -> String {
+    let lead = RULE.repeat(RULE_LEAD);
+    let spent = RULE_LEAD + LABEL.chars().count() + 2;
+    let tail = RULE.repeat(width.saturating_sub(spent));
+    if color {
+        format!("{WHITE}{lead} {BOLD}{BLUE}{LABEL}{RESET}{WHITE} {tail}{RESET}")
+    } else {
+        format!("{lead} {LABEL} {tail}")
+    }
+}
+
+/// How wide to draw the rule.
+///
+/// Asked of the terminal every run rather than cached: the window may well have
+/// been resized while the board was open. The `is_terminal` check is not
+/// redundant - `size` reports whatever terminal it can find, including when
+/// this run's output is going to a file, and a redirect should not inherit the
+/// window's width.
+fn rule_width() -> usize {
+    if !io::stdout().is_terminal() {
+        return FALLBACK_WIDTH;
+    }
+    match terminal::size() {
+        Ok((columns, _)) if columns > 0 => columns as usize,
+        _ => FALLBACK_WIDTH,
+    }
+}
+
+/// Whether the rule has been drawn. Shared so the block is opened once and
+/// closed only if it was opened at all.
+static BLOCK_OPEN: Once = Once::new();
+
+/// Print the blank line and the rule, once, before the first line pinz says.
+///
+/// Which line that is depends on the run - a save error, a status summary, a
+/// push - so the opener is guarded rather than placed at one call site. Nothing
+/// to say means no rule, rather than a heading over an empty block.
+fn open_block() {
+    BLOCK_OPEN.call_once(|| {
+        println!("\n{}", divider_line(rule_width(), color_on(&io::stdout())));
+    });
+}
+
+/// Close the block with the blank line it opened with, so it reads as a block
+/// rather than as output that trailed off into the prompt. A run that said
+/// nothing has no block to close.
+fn close_block() {
+    if BLOCK_OPEN.is_completed() {
+        println!();
+    }
+}
+
+/// The glyph and tint a step's outcome is reported with.
+///
+/// Idle is deliberately quiet rather than green: "nothing needed doing" and "it
+/// worked" are different answers, and a board that never pushed should not look
+/// like one that did.
+fn mark(outcome: &SyncOutcome) -> (&'static str, &'static str) {
+    match outcome {
+        SyncOutcome::Done(_) => ("\u{2713}", GREEN),
+        SyncOutcome::Idle(_) => ("\u{b7}", DIM),
+        SyncOutcome::Stopped(_) => ("\u{2717}", RED),
+    }
+}
+
+/// One step's line: `  \u{2713} push    2 commits`.
+///
+/// Only the glyph and the step name are painted. The message is git's own
+/// wording, folded up from its stderr, and often carries a path or a branch -
+/// that reads better plain, and keeps the color meaning one thing.
+fn report_line(step: &str, outcome: &SyncOutcome, color: bool) -> String {
+    let (glyph, tint) = mark(outcome);
+    let step = format!("{step:<STEP_COLUMN$}");
+    let message = outcome.message();
+    if color {
+        format!("{INDENT}{tint}{glyph} {step}{RESET}  {message}")
+    } else {
+        format!("{INDENT}{glyph} {step}  {message}")
+    }
+}
+
+/// Something that went wrong, in the same shape as a step so the eye can follow
+/// one column down the page.
+fn problem_line(text: &str, color: bool) -> String {
+    let (glyph, tint) = mark(&SyncOutcome::Stopped(String::new()));
+    if color {
+        format!("{INDENT}{tint}{glyph} {text}{RESET}")
+    } else {
+        format!("{INDENT}{glyph} {text}")
+    }
+}
+
+/// A line that expands on the one above it: where the board is, what git can
+/// see, what to do about a missing remote.
+///
+/// One tint for all of it, so the eye can tell "pinz telling you something"
+/// from "pinz reporting what it did" without reading either.
+fn detail_line(text: &str, color: bool) -> String {
+    text.lines()
+        .map(|line| {
+            if color {
+                format!("{BLUE}{INDENT}{line}{RESET}")
+            } else {
+                format!("{INDENT}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Say something informational, opening the block if this is the first line.
+fn detail(text: &str) {
+    open_block();
+    println!("{}", detail_line(text, color_on(&io::stdout())));
+}
+
+/// The readable half of a remote URL. `git@github.com:Gaurgle/pinz-board.git`
+/// and `https://github.com/Gaurgle/pinz-board.git` both come back as
+/// `Gaurgle/pinz-board`.
+///
+/// Owner and repo, the way `gh` names one. The host is dropped: pins live in
+/// one place, and reading it out on every quit is noise. A remote that is a
+/// directory keeps its last two segments, which is the same idea applied to a
+/// path. Anything this cannot make sense of is shown as it is, because a
+/// destination you do not recognise is exactly when you need to see it.
+fn short_remote(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let segments: Vec<&str> = trimmed
+        .split(['/', ':'])
+        // Drops the scheme's empty pieces, and `git@host` from an ssh URL.
+        .filter(|part| !part.is_empty() && !part.contains('@'))
+        .collect();
+    let from = segments.len().saturating_sub(2);
+    let short = segments[from..].join("/");
+    if short.is_empty() {
+        url.to_string()
+    } else {
+        short
+    }
+}
+
+/// What a finished push says: git's wording, then where the pins went.
+///
+/// The destination is the point of the line. Two machines pointed at different
+/// remotes look identical until the name is on screen, and that is a mistake
+/// you want to catch on the quit that made it, not a week later.
+fn push_message(what: &str, destination: Option<&str>, color: bool) -> String {
+    match destination {
+        Some(name) if color => format!("{what} to {CYAN}{name}{RESET}"),
+        Some(name) => format!("{what} to {name}"),
+        None => what.to_string(),
+    }
+}
+
 fn report(step: &str, outcome: impl AsOutcome) {
     let outcome = outcome.as_outcome();
-    let mark = match outcome {
-        SyncOutcome::Done(_) => "ok",
-        SyncOutcome::Idle(_) => "--",
-        SyncOutcome::Stopped(_) => "!!",
+    open_block();
+    println!("{}", report_line(step, outcome, color_on(&io::stdout())));
+}
+
+/// Push, and say where to.
+///
+/// Only a push that actually moved something names a destination: `nothing to
+/// sync` has no repo to point at, and a failure already carries git's reason.
+fn report_push(sync: &Sync, commit_message: &str) {
+    let outcome = match sync.push(commit_message) {
+        SyncOutcome::Done(what) => {
+            let destination = sync.remote_url().map(|url| short_remote(&url));
+            SyncOutcome::Done(push_message(
+                &what,
+                destination.as_deref(),
+                color_on(&io::stdout()),
+            ))
+        }
+        other => other,
     };
-    println!("{mark} {step}: {}", outcome.message());
+    report("push", outcome);
+}
+
+/// `report`, for the lines that go to stderr because nobody asked for them.
+fn report_problem(text: &str) {
+    open_block();
+    eprintln!("{}", problem_line(text, color_on(&io::stderr())));
 }
 
 /// Lets `report` take an outcome by value or by reference without cloning.
@@ -384,13 +625,13 @@ fn run_app(opts: Options) -> io::Result<()> {
 
     let save_error = result?;
     if let Some(message) = &save_error {
-        eprintln!("!! could not write pins: {message}");
+        report_problem(&format!("could not write pins: {message}"));
     }
 
     // A last save catches anything the loop deferred (a quit mid-drag).
     if !app.read_only() {
         if let Err(e) = persist(&mut app, &mut store) {
-            eprintln!("!! could not write pins: {e}");
+            report_problem(&format!("could not write pins: {e}"));
             return Ok(());
         }
     }
@@ -399,13 +640,19 @@ fn run_app(opts: Options) -> io::Result<()> {
     // - no remote, nothing staged, a rejected push - so staying silent on
     // success leaves you guessing whether the other machine has your pins.
     if let (Some(sync), true) = (&sync, may_push && save_error.is_none()) {
-        report("push", sync.push("pinz: update pins"));
+        report_push(sync, "pinz: update pins");
     }
     // Now that the terminal is ours again, the startup stop also lands in
     // scrollback - the footer warning disappeared with the alternate screen.
     if let Some(stop) = &sync_stop {
-        eprintln!("!! {stop}");
-        eprintln!("   pinz did not push this run; resolve, then run `pinz sync`.");
+        report_problem(&stop.to_string());
+        eprintln!(
+            "{}",
+            detail_line(
+                "pinz did not push this run; resolve, then run `pinz sync`.",
+                color_on(&io::stderr())
+            )
+        );
     }
     Ok(())
 }
@@ -890,5 +1137,180 @@ mod tests {
         assert_eq!(pin.body, "oat, not soy");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The lines pinz prints around the TUI, on the way in and on the way out.
+    // Each is built as a string rather than printed, so its shape can be
+    // checked with no terminal attached.
+
+    #[test]
+    fn a_finished_step_lines_its_name_up_in_a_column() {
+        let done = report_line("push", &SyncOutcome::Done("2 commits".into()), false);
+        let longer = report_line("commit", &SyncOutcome::Done("1 pin".into()), false);
+        assert_eq!(done, "  \u{2713} push    2 commits");
+        assert_eq!(
+            done.find("2 commits"),
+            longer.find("1 pin"),
+            "messages start in the same column whatever the step is called"
+        );
+    }
+
+    #[test]
+    fn nothing_to_do_is_not_dressed_up_as_success() {
+        let line = report_line("pull", &SyncOutcome::Idle("already current".into()), false);
+        assert!(
+            line.starts_with("  \u{b7}"),
+            "idle must not wear the done glyph: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_is_marked_as_one() {
+        let line = report_line("push", &SyncOutcome::Stopped("rejected".into()), false);
+        assert!(line.starts_with("  \u{2717}"), "{line:?}");
+    }
+
+    #[test]
+    fn painting_tints_the_step_and_leaves_the_message_alone() {
+        let line = report_line("push", &SyncOutcome::Done("2 commits".into()), true);
+        assert!(line.contains(GREEN), "a done step is green: {line:?}");
+        assert!(
+            line.ends_with("2 commits"),
+            "git's own words stay unpainted: {line:?}"
+        );
+        assert_eq!(
+            line.matches(RESET).count(),
+            1,
+            "every escape is closed, or the tint bleeds into the next line: {line:?}"
+        );
+    }
+
+    #[test]
+    fn an_unpainted_line_carries_no_escapes() {
+        let line = report_line("push", &SyncOutcome::Done("2 commits".into()), false);
+        assert!(
+            !line.contains('\u{1b}'),
+            "piped output must stay clean: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_problem_sits_in_the_block_like_a_step() {
+        let line = problem_line("could not write pins: disk full", false);
+        assert_eq!(line, "  \u{2717} could not write pins: disk full");
+    }
+
+    #[test]
+    fn a_detail_joins_the_block_and_keeps_its_own_shape() {
+        assert_eq!(
+            detail_line("no remote yet:\n  clone it", false),
+            "  no remote yet:\n    clone it",
+            "the block's indent adds to the text's own, it does not flatten it"
+        );
+        let painted = detail_line("in sync", true);
+        assert!(
+            painted.starts_with(BLUE) && painted.ends_with(RESET),
+            "informational text reads as one voice: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn every_line_of_a_painted_detail_closes_its_own_escape() {
+        let painted = detail_line("one\ntwo\nthree", true);
+        assert_eq!(
+            painted.lines().count(),
+            painted.matches(RESET).count(),
+            "a tint left open would bleed down the page: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn the_rule_spans_the_width_it_is_given_and_says_whose_block_it_is() {
+        let rule = divider_line(40, false);
+        assert_eq!(rule.chars().count(), 40, "a divider divides the whole width");
+        assert!(rule.contains(LABEL), "{rule:?}");
+        assert!(!rule.contains('\u{1b}'), "a piped run gets a plain rule");
+    }
+
+    #[test]
+    fn the_rule_survives_a_terminal_too_narrow_to_hold_it() {
+        let rule = divider_line(2, false);
+        assert!(rule.contains(LABEL), "the label outranks the rule: {rule:?}");
+    }
+
+    #[test]
+    fn a_painted_rule_closes_every_escape_it_opens() {
+        let rule = divider_line(40, true);
+        assert!(rule.ends_with(RESET), "{rule:?}");
+        assert_eq!(
+            rule.matches(BOLD).count(),
+            1,
+            "only the label is bold: {rule:?}"
+        );
+    }
+
+    #[test]
+    fn the_rule_is_furniture_and_the_name_is_not() {
+        let rule = divider_line(40, true);
+        let name = rule.find(LABEL).expect("the rule is labelled");
+        assert!(
+            rule[..name].ends_with(&format!("{BOLD}{BLUE}")),
+            "the name is the blue pinz answers to: {rule:?}"
+        );
+        assert!(
+            rule.starts_with(WHITE),
+            "the rule itself stays neutral: {rule:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_url_shortens_to_the_name_a_human_would_say() {
+        for url in [
+            "git@github.com:Gaurgle/pinz-board.git",
+            "https://github.com/Gaurgle/pinz-board.git",
+            "https://github.com/Gaurgle/pinz-board",
+            "ssh://git@github.com/Gaurgle/pinz-board.git/",
+        ] {
+            assert_eq!(short_remote(url), "Gaurgle/pinz-board", "{url}");
+        }
+    }
+
+    #[test]
+    fn a_remote_that_is_a_directory_keeps_enough_of_the_path_to_place_it() {
+        assert_eq!(short_remote("/Volumes/backup/pinz-board.git"), "backup/pinz-board");
+        assert_eq!(short_remote("pinz-board.git"), "pinz-board");
+    }
+
+    #[test]
+    fn a_remote_pinz_cannot_read_is_shown_as_it_is_rather_than_swallowed() {
+        assert_eq!(short_remote(""), "");
+        assert_eq!(short_remote("::"), "::");
+    }
+
+    #[test]
+    fn a_push_says_where_it_went_in_a_tint_of_its_own() {
+        let plain = push_message("pushed", Some("Gaurgle/pinz-board"), false);
+        assert_eq!(plain, "pushed to Gaurgle/pinz-board");
+
+        let painted = push_message("pushed", Some("Gaurgle/pinz-board"), true);
+        assert!(painted.contains(CYAN), "the destination is tinted: {painted:?}");
+        assert!(painted.ends_with(RESET), "{painted:?}");
+        assert!(
+            painted.starts_with("pushed to"),
+            "git's own wording still leads: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_push_with_nowhere_to_report_says_only_what_git_said() {
+        assert_eq!(push_message("pushed", None, true), "pushed");
+    }
+
+    #[test]
+    fn no_color_turns_the_paint_off() {
+        std::env::set_var("NO_COLOR", "1");
+        assert!(colors_opted_out(), "NO_COLOR is the cross-tool opt out");
+        std::env::remove_var("NO_COLOR");
+        assert!(!colors_opted_out());
     }
 }
