@@ -26,8 +26,9 @@ use std::time::{Duration, Instant};
 
 use app::App;
 use pinz_core::{
+    latest_release,
     lock::{BoardLock, Ownership},
-    Board, Color, FileStore, Note, Store, StoreError, Sync, SyncOutcome,
+    Board, Color, FileStore, Note, Standing, Store, StoreError, Sync, SyncOutcome, Version,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
@@ -66,6 +67,10 @@ fn first_board() -> Board {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Where pinz itself is published, read from the manifest so the URL is
+/// written down once. It is what `pinz version` asks for the release list.
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
 fn main() -> io::Result<()> {
     let opts = Options::parse(std::env::args().skip(1));
     let result = match opts.command {
@@ -74,7 +79,7 @@ fn main() -> io::Result<()> {
             Ok(())
         }
         Command::Version => {
-            println!("pinz {VERSION}");
+            println!("{}", version_report(VERSION, latest_release(REPOSITORY), REPOSITORY));
             Ok(())
         }
         Command::Sync => git_command(Command::Sync),
@@ -179,7 +184,7 @@ USAGE:
     pinz pull           only bring the other machine's pins in
     pinz push           only commit and send this machine's pins
     pinz help           show this
-    pinz version        print the version
+    pinz version        print this build, and the newest release
 
 OPTIONS:
     -t, --theme <NAME>  start in a theme (mocha, tokyo, gruvbox, nord, light)
@@ -190,6 +195,55 @@ PINS:
     file per pin. It is an ordinary git repo: add a remote and `pinz sync`
     keeps your machines level."
     );
+}
+
+// ---- the version subcommand ----
+
+/// Label column for the version report, so the two numbers line up under each
+/// other and the pair reads as one answer rather than two lines. Six holds
+/// `latest`, the longer of the labels.
+const VERSION_COLUMN: usize = 6;
+
+/// Where a person goes to get the newer build. GitHub resolves
+/// `/releases/latest` itself, so nothing here has to know the number it just
+/// finished printing.
+fn releases_url(repository: &str) -> String {
+    let base = repository.trim_end_matches('/');
+    let base = base.strip_suffix(".git").unwrap_or(base);
+    format!("{base}/releases/latest")
+}
+
+/// What `pinz version` prints: this build, the newest release, and where one
+/// stands against the other.
+///
+/// `latest` is `None` whenever the answer did not arrive - offline, no git, a
+/// repository that has moved. That prints as `unknown` and is not an error.
+/// The running build is the half of the question that always has an answer,
+/// and a version command that fails because GitHub is unreachable would be
+/// refusing to answer the part it knows.
+///
+/// The third line is dropped rather than guessed when either number is
+/// missing: with nothing to compare, "up to date" and "behind" are both
+/// claims pinz cannot make.
+fn version_report(running: &str, latest: Option<Version>, repository: &str) -> String {
+    let mut lines = vec![format!("{:<VERSION_COLUMN$}  {running}", "pinz")];
+    let name = short_remote(repository);
+    lines.push(match latest {
+        Some(latest) => format!("{:<VERSION_COLUMN$}  {latest}  ({name})", "latest"),
+        None => format!("{:<VERSION_COLUMN$}  unknown  (could not reach {name})", "latest"),
+    });
+    if let Some((running, latest)) = Version::parse(running).zip(latest) {
+        lines.push(match running.standing(&latest) {
+            Standing::Current => "up to date".to_string(),
+            Standing::Behind => {
+                format!("a newer release is out: {}", releases_url(repository))
+            }
+            // The state that started this: a version bumped in the repo, and
+            // a header confidently naming a build nobody can download.
+            Standing::Ahead => "ahead: this build is not released yet".to_string(),
+        });
+    }
+    lines.join("\n")
 }
 
 fn pin_root() -> io::Result<PathBuf> {
@@ -1067,6 +1121,63 @@ mod tests {
             assert_eq!(parse(&[word]).command, Command::Version, "{word:?}");
         }
         assert!(!VERSION.is_empty());
+    }
+
+    /// The repository is passed in rather than read from the manifest, so
+    /// these assert on wording and not on whatever pinz is published as today.
+    const REPO: &str = "https://github.com/Gaurgle/pinz";
+
+    fn version(major: u32, minor: u32, patch: u32) -> Version {
+        Version {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    #[test]
+    fn the_version_report_names_the_build_and_the_release_it_matches() {
+        assert_eq!(
+            version_report("0.4.0", Some(version(0, 4, 0)), REPO),
+            "pinz    0.4.0\nlatest  0.4.0  (Gaurgle/pinz)\nup to date"
+        );
+    }
+
+    #[test]
+    fn a_build_behind_the_release_is_told_where_to_get_the_new_one() {
+        let report = version_report("0.4.0", Some(version(0, 5, 0)), REPO);
+        assert!(report.contains("latest  0.5.0"), "{report}");
+        assert!(
+            report.ends_with("a newer release is out: https://github.com/Gaurgle/pinz/releases/latest"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_build_ahead_of_the_release_is_named_as_unreleased() {
+        // The 2026-08-27 state: 0.4.1 in the manifest, v0.4.0 the newest tag.
+        let report = version_report("0.4.1", Some(version(0, 4, 0)), REPO);
+        assert!(report.ends_with("ahead: this build is not released yet"), "{report}");
+    }
+
+    #[test]
+    fn an_unreachable_remote_still_reports_the_running_build() {
+        let report = version_report("0.4.1", None, REPO);
+        assert_eq!(
+            report,
+            "pinz    0.4.1\nlatest  unknown  (could not reach Gaurgle/pinz)"
+        );
+        // No standing line: with one number there is nothing to compare, and
+        // both "up to date" and "behind" would be inventions.
+        assert_eq!(report.lines().count(), 2);
+    }
+
+    #[test]
+    fn a_releases_url_survives_a_trailing_slash_or_a_git_suffix() {
+        let expected = "https://github.com/Gaurgle/pinz/releases/latest";
+        assert_eq!(releases_url("https://github.com/Gaurgle/pinz"), expected);
+        assert_eq!(releases_url("https://github.com/Gaurgle/pinz/"), expected);
+        assert_eq!(releases_url("https://github.com/Gaurgle/pinz.git"), expected);
     }
 
     #[test]

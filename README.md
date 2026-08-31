@@ -125,8 +125,13 @@ that state calls for:
 | `pinz status` (`st`) | reports what is waiting and changes nothing |
 | `pinz pull` | only brings the other machine's pins in |
 | `pinz push` | only commits and sends this machine's pins |
-| `pinz version` | prints the version - worth checking that both machines match |
+| `pinz version` | prints this build and the newest release, and whether they match |
 | `pinz help` | the above, from the tool itself |
+
+`pinz version` reads the release tags off the source repo with `git ls-remote`,
+so it answers three things at once: what this machine runs, what has shipped,
+and whether you are level, behind, or on a build that was never released. With
+no network it says `unknown` for the release and still prints your build.
 
 Two flags: `--no-sync` opens the board without touching git at all, and
 `--theme <name>` (or a bare theme name) picks the starting theme.
@@ -143,7 +148,8 @@ carries news instead: what a drag is about to do, what was copied, why a board
 is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
-detail (scroll zooms about the cursor; `+`/`-` about the selected pin, which
+detail (from preview zoom up the wheel belongs to the pin under the pointer
+and only zooms over bare board; `+`/`-` about the selected pin, which
 ends up centered, or the middle of the view when nothing is selected), **drag a
 note** to move it, **drag the board** to pan (arrow keys too),
 `Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
@@ -154,10 +160,32 @@ for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to step the
 selection between pins, `e` or `enter` to edit the selected note (which zooms in
 and centers it; first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
-`ctrl`+`u` clears the line, `esc` saves),
+`ctrl`+`u` clears the line, `esc` saves; the note scrolls with the wheel or by
+moving the caret past an edge),
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
 `u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
 the active one is named in the header), `q` to quit.
+
+A pin holding more text than it can show scrolls where it lies, open or not:
+put the pointer on it and use the wheel, or `page up`/`page down` on the
+selected pin. It draws a thumb on its right border while there is more.
+
+Which gesture the wheel is depends on what is under the pointer, never on how
+much someone wrote:
+
+| Pointer is on | Zoom level | The wheel |
+| ------------- | ---------- | --------- |
+| a pin | preview or document | scrolls that pin; a short one has nowhere to go |
+| bare board | preview or document | zooms |
+| anything | cluster or titles | zooms |
+
+A short pin absorbing the wheel is the point rather than an oversight: the
+board never lurches out from under a pin you were reading, and you do not have
+to know how much text a pin holds to know what the wheel will do. The
+exception is about the zoom level, not the contents. Cluster and titles draw
+no body to read and are the levels where pins cover the screen, so a wheel
+that died on every one of them would leave a full board impossible to zoom out
+of with the mouse.
 
 ### Deleting a world
 

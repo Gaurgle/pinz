@@ -12,11 +12,13 @@ pub mod geometry;
 pub mod lock;
 pub mod merge;
 pub mod model;
+pub mod release;
 pub mod store;
 pub mod sync;
 
 pub use file_store::FileStore;
 pub use geometry::{Camera, Projection, ScreenPoint, WorldPoint, ZoomLevel};
 pub use model::{Board, Color, Note, NOTE_H, NOTE_W};
+pub use release::{latest_release, Standing, Version};
 pub use store::{MemoryStore, Store, StoreError};
 pub use sync::{Sync, SyncOutcome};
