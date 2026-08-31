@@ -55,13 +55,23 @@ not chase the caret back, which is what makes it useful: you can look up at
 what you wrote without losing where you are typing. The next keystroke brings
 the caret back into view, which is what every editor does.
 
-**The wheel picks its target by what is under it.** Over a pin holding more
-text than it can show, it moves that pin's window. Anywhere else - bare
-board, or a pin with nothing hidden - it zooms, exactly as before.
+**The wheel picks its target by what is under it.** On a pin it moves that
+pin's window; on bare board it zooms.
 
-That last clause is what keeps the gesture honest. A pin that fits is not a
-scroll target, so the wheel does not go dead over the majority of the board,
-and it only changes meaning where there is something to reveal.
+What it deliberately does *not* consult is the pin's contents. A pin with
+nothing hidden absorbs the notch and does nothing. An earlier pass let those
+fall through to zoom, on the reasoning that a wheel which does nothing is
+wasted, and that was wrong in use: the world lurched out from under a short
+pin while its longer neighbour scrolled, so before turning the wheel you had
+to know how much text a pin held. A gesture decided by what is under the
+pointer is one you can predict; a gesture decided by how much someone wrote
+is not.
+
+The one carve-out is zoom level, not content. At cluster and titles no body
+is drawn, a pin is a block or a headline rather than something you read down,
+and those are exactly the levels where pins cover the screen - a wheel that
+died on every one of them would leave a full board impossible to zoom out
+of. So below preview zoom the wheel is the board's, whatever it is over.
 
 While a note is open in the editor the wheel belongs to it wherever the
 pointer is: you are inside its text, not on the board. Keys are already text

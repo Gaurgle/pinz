@@ -148,9 +148,8 @@ carries news instead: what a drag is about to do, what was copied, why a board
 is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
-detail (scroll zooms about the cursor, unless the cursor is over a pin with
-more text than it can show, where it scrolls that pin instead; `+`/`-` about
-the selected pin, which
+detail (from preview zoom up the wheel belongs to the pin under the pointer
+and only zooms over bare board; `+`/`-` about the selected pin, which
 ends up centered, or the middle of the view when nothing is selected), **drag a
 note** to move it, **drag the board** to pan (arrow keys too),
 `Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
@@ -169,9 +168,14 @@ the active one is named in the header), `q` to quit.
 
 A pin holding more text than it can show scrolls where it lies, open or not:
 put the pointer on it and use the wheel, or `page up`/`page down` on the
-selected pin. It draws a thumb on its right border while there is more, and a
-pin with nothing hidden is not a scroll target at all, so the wheel goes on
-zooming the board everywhere else.
+selected pin. It draws a thumb on its right border while there is more.
+
+Which gesture the wheel is depends on what is under the pointer, not on what
+the pin says: from preview zoom up, a pin takes the wheel and a short one
+simply has nowhere to go, so the wheel never zooms the board out from under a
+pin you were reading. Over bare board it zooms as always, and at cluster and
+titles zoom - where pins cover the screen and there is no body drawn to read -
+it zooms everywhere.
 
 ### Deleting a world
 

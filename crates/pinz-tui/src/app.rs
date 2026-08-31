@@ -1601,35 +1601,40 @@ impl App {
             .insert(id, at.min(wrapped.rows.len().saturating_sub(height)));
     }
 
-    /// The wheel: over a note with more text than it can show, it moves that
-    /// note's window; anywhere else it zooms the board.
+    /// The wheel: on a note it moves that note's text, on the board it zooms.
     ///
-    /// This is the whole rule. A note that is not hiding anything is not a
-    /// scroll target, so the wheel keeps zooming over the vast majority of the
-    /// board and only changes meaning where there is something to reveal.
+    /// A note that is not hiding anything absorbs the notch and does nothing.
+    /// That is the point rather than an oversight: which gesture you get is
+    /// decided by what is under the pointer, never by how much someone happened
+    /// to write. A wheel that zoomed the world out from under a short pin and
+    /// scrolled a long one is a gesture you cannot predict before you turn it.
     fn wheel(&mut self, down: bool, col: u16, row: u16) {
-        match self.scrollable_at(col, row) {
-            Some(id) => {
-                let rows = if down { WHEEL_ROWS } else { -WHEEL_ROWS };
-                self.scroll_note(id, rows);
-            }
+        match self.wheel_target(col, row) {
+            // `scroll_note` clamps, so this is a no-op on a note that fits.
+            Some(id) => self.scroll_note(id, if down { WHEEL_ROWS } else { -WHEEL_ROWS }),
             None => self.zoom_at(!down, col, row),
         }
     }
 
-    /// The note the wheel would scroll, if any.
+    /// The note the wheel belongs to, or `None` when it belongs to the board.
     ///
-    /// While a note is open the wheel belongs to it wherever the pointer is:
-    /// you are inside its text, not on the board. Otherwise it is the topmost
-    /// note under the cursor, and only when that note is hiding something.
-    fn scrollable_at(&self, col: u16, row: u16) -> Option<u64> {
-        let id = if self.mode == Mode::Edit {
-            self.selected?
-        } else {
-            let world = self.view().world_at(col, row);
-            self.active_board().note_at(world)?.id
-        };
-        (self.max_scroll_of(id) > 0).then_some(id)
+    /// While a note is open the wheel is its own wherever the pointer is: you
+    /// are inside its text, not on the board.
+    ///
+    /// Zoomed out past the body the wheel is the board's, whatever it is over.
+    /// A note at cluster or titles zoom is a block or a headline rather than
+    /// something you read down, and those are the levels where notes cover the
+    /// screen - a wheel that died on every one of them would leave you unable
+    /// to zoom out of a full board.
+    fn wheel_target(&self, col: u16, row: u16) -> Option<u64> {
+        if self.mode == Mode::Edit {
+            return self.selected;
+        }
+        if !matches!(self.zoom(), ZoomLevel::Preview | ZoomLevel::Document) {
+            return None;
+        }
+        let world = self.view().world_at(col, row);
+        Some(self.active_board().note_at(world)?.id)
     }
 
     /// Page the selected note's text, the keyboard's answer to the wheel.
@@ -4149,19 +4154,47 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_over_a_note_with_nothing_hidden_zooms() {
-        // A note that fits is not a scroll target. Swallowing the wheel there
-        // would make it dead over most of the board.
+    fn the_wheel_over_a_short_note_does_nothing_rather_than_zooming() {
+        // Which gesture you get is decided by what is under the pointer, not
+        // by how much someone wrote. A pin that zoomed the world out while its
+        // longer neighbour scrolled is a wheel you cannot predict.
         let mut a = viewing_a_note_of(1);
         let (col, row) = cell_of_note(&a, 1);
         a.on_mouse(wheel(true, col, row));
-        assert_eq!(a.zoom(), ZoomLevel::Preview);
+        assert_eq!(a.zoom(), ZoomLevel::Document, "the board held still");
+        assert_eq!(a.scroll_of(1), 0, "and there was nothing to move");
     }
 
     #[test]
-    fn a_zoom_level_that_draws_no_body_is_not_a_scroll_target() {
-        // At titles zoom the note shows one line, so there is nothing to
-        // reveal and the wheel belongs to the camera.
+    fn a_note_holds_the_wheel_from_preview_zoom_up() {
+        // Preview is the first level that draws a body, so it is the first
+        // where the wheel can mean "read this pin".
+        let mut a = board_with_note_of(40);
+        a.on_key(key(KeyCode::Char('+')));
+        assert_eq!(a.zoom(), ZoomLevel::Preview);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(wheel(true, col, row));
+        assert_eq!(a.zoom(), ZoomLevel::Preview, "the board held still");
+        assert_eq!(a.scroll_of(1), WHEEL_ROWS as usize, "the pin moved");
+    }
+
+    #[test]
+    fn a_short_note_being_edited_holds_the_wheel_too() {
+        let mut a = editing_a_note_of(1);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(wheel(true, col, row));
+        assert_eq!(
+            a.zoom(),
+            ZoomLevel::Document,
+            "the board must not move under a note you are writing in"
+        );
+    }
+
+    #[test]
+    fn zoomed_out_past_the_body_the_wheel_is_the_boards() {
+        // Cluster and titles are where notes cover the screen. A wheel that
+        // died on every one of them would leave a full board impossible to
+        // zoom out of, and a note there is a block, not something you read.
         let mut a = board_with_note_of(40);
         assert_eq!(a.zoom(), ZoomLevel::Titles);
         let (col, row) = cell_of_note(&a, 1);
