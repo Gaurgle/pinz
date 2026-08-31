@@ -39,7 +39,8 @@ where the session runs.
 
 Usable. A pannable, zoomable board with a four-level zoom ladder, switchable
 worlds, mouse move and select, in-place editing through one word-wrapped editor,
-text selection with copy and paste, and git sync at the edges.
+text selection with copy and paste, a moving window over a note whose text
+outgrew it, and git sync at the edges.
 
 There is no CI yet, and no `epoz` renderer yet - `pinz-core` has exactly one
 consumer today, but its API is designed as though it had two.

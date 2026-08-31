@@ -111,8 +111,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("alt + ← →", "by word"),
             ("ctrl+a", "select all"),
             ("ctrl+c / ctrl+x", "copy, cut"),
-            ("ctrl+⌫", "delete a word"),
-            ("ctrl+u", "clear the line"),
+            ("ctrl+⌫ / ctrl+u", "kill word, line"),
+            ("scroll", "through a long note"),
             ("esc", "save and close"),
         ],
     ),
@@ -500,7 +500,13 @@ fn draw_note_widget(
         // through the wrap so text never runs off the right edge.
         if let Some(editor) = editing.then(|| app.editor()).flatten() {
             let lines = editor_lines(editor, inner.width as usize, theme);
-            Paragraph::new(lines).render(inner, buf);
+            let rows = lines.len();
+            // A note is a fixed size, so a long one is read through a moving
+            // window rather than by growing the note. `App` owns where that
+            // window sits, because a click on text is resolved against it too.
+            let scroll = app.edit_scroll().min(u16::MAX as usize) as u16;
+            Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
+            draw_text_bar(buf, full, inner, app.edit_scroll(), rows, theme.overlay0);
             return;
         }
 
@@ -520,6 +526,42 @@ fn draw_note_widget(
             .wrap(Wrap { trim: true })
             .render(inner, buf);
     });
+}
+
+/// A thumb on the note's right border, sized to how much of the text is on
+/// screen and placed by how far down it has scrolled.
+///
+/// Same glyph and colour as the board's own scrollbars, so the two read as one
+/// idea at two scales. Nothing is drawn when the text fits: a note that is not
+/// hiding anything should look exactly as it always did.
+///
+/// Painted on the border rather than inside it. The interior is 38 columns of
+/// someone's writing and a bar there would either cover a character or force
+/// the wrap to narrow, and the wrap is shared with hit-testing.
+fn draw_text_bar(
+    buf: &mut Buffer,
+    full: Rect,
+    inner: Rect,
+    offset: usize,
+    rows: usize,
+    color: ratatui::style::Color,
+) {
+    let height = inner.height as usize;
+    if height == 0 || rows <= height || full.width == 0 {
+        return;
+    }
+    let track = inner.height;
+    let len = (((height as f64 / rows as f64) * track as f64).round() as u16).clamp(1, track);
+    // Rows that can be scrolled past, which is what the thumb's travel maps.
+    let span = rows - height;
+    let pos = (offset.min(span) as f64) / span as f64;
+    let top = inner.y + ((track - len) as f64 * pos).round() as u16;
+    let col = full.width - 1;
+    for i in 0..len {
+        if let Some(cell) = buf.cell_mut((col, top + i)) {
+            cell.set_symbol("\u{2590}").set_fg(color);
+        }
+    }
 }
 
 /// Paint `render` into an off-screen buffer the size of `cells`, then copy the
@@ -955,6 +997,76 @@ mod tests {
         assert!(
             text.contains("hello"),
             "typed body should be on screen:\n{text}"
+        );
+    }
+
+    /// A board holding one pin whose body is `rows` numbered lines, opened in
+    /// the editor and drawn once.
+    fn drawn_editing_a_note_of(rows: usize) -> (String, Terminal<TestBackend>) {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        let mut store = MemoryStore::seeded();
+        let mut boards = store.load().unwrap();
+        boards[0].notes.clear();
+        boards[0].notes.push(pinz_core::Note {
+            id: 900,
+            title: "TITLE".into(),
+            body: (1..=rows)
+                .map(|i| format!("row{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            x: 0.0,
+            y: 0.0,
+            z: 1,
+            color: pinz_core::Color::Yellow,
+        });
+        let mut app = App::new(boards);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let press = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        // shift+right steps between pins, which is how a test selects one.
+        app.on_key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        app.on_key(press(KeyCode::Char('e')));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal.backend().buffer().clone());
+        (text, terminal)
+    }
+
+    #[test]
+    fn a_note_too_long_to_fit_is_drawn_from_where_it_scrolled_to() {
+        // The caret opens at the end of the text, so the end is what should be
+        // on screen. Before scrolling existed the note drew from row 1 and the
+        // caret sat below the border, invisible.
+        let (text, _) = drawn_editing_a_note_of(40);
+        assert!(text.contains("row40"), "the end of the note is where the caret is:\n{text}");
+        assert!(
+            !text.contains("row1 "),
+            "and the top has scrolled away:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_note_carries_a_thumb_and_a_short_one_does_not() {
+        let (long, _) = drawn_editing_a_note_of(40);
+        let (short, _) = drawn_editing_a_note_of(2);
+        assert!(
+            long.contains('\u{2590}'),
+            "a note hiding text should say so:\n{long}"
+        );
+        assert!(
+            !short.contains('\u{2590}'),
+            "a note that fits should look exactly as it always did:\n{short}"
         );
     }
 
