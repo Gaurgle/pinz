@@ -16,8 +16,23 @@ use crate::editor::{Cursor, Motion, TextEditor};
 use crate::theme::{self, Theme};
 use crate::view::{CellRect, View};
 use crate::wrap::{self, Wrapped};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
+
+/// A note's text as logical lines, the way it reads when it is not being
+/// edited: the title, a blank spacer, then the body from preview zoom up.
+///
+/// The one place a note becomes lines. `App` wraps these to know how far the
+/// note can scroll and a click can reach; `ui` wraps them to draw it. The
+/// repo's standing rule is that those are the same layout, computed once.
+pub fn note_lines(note: &Note, lod: ZoomLevel) -> Vec<String> {
+    let mut lines = vec![note.title.clone()];
+    if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
+        lines.push(String::new());
+        lines.extend(note.body.split('\n').map(str::to_string));
+    }
+    lines
+}
 
 /// Arrow-key pan step, in cells.
 const PAN_CELLS: f64 = 4.0;
@@ -29,7 +44,7 @@ const NEW_TAB_WIDTH: u16 = 3;
 /// Rows of note text one wheel notch moves. Three is what a terminal sends a
 /// pager, and a note is only thirteen rows tall: a full page a notch would
 /// leave nothing on screen to read the new position against.
-const SCROLL_STEP: usize = 3;
+const WHEEL_ROWS: isize = 3;
 
 /// Longest world name we will take. A world is a directory, so this is about
 /// keeping paths sane rather than anything deeper.
@@ -221,16 +236,21 @@ pub struct App {
     help: bool,
     /// The live note editor, present only while in [`Mode::Edit`].
     editor: Option<TextEditor>,
-    /// Wrapped rows of the note being edited that sit above the top of its
-    /// text area.
+    /// How far each note's text is scrolled: the wrapped rows sitting above its
+    /// text area, by note id. A note with no entry is at the top.
     ///
     /// A note is a fixed size in world units, so text longer than it fits is
-    /// not a layout to fix but a window to move, and this is where that window
-    /// sits. Kept here rather than in the renderer because `App` already owns
-    /// the wrap that a click on text goes through: an offset only the renderer
-    /// knew would put clicks on the wrong row the moment the text moved.
-    /// Zero unless a note is open.
-    edit_scroll: usize,
+    /// not a layout to fix but a window to move, and this is where those
+    /// windows sit. One per note rather than one for the app, so reading down
+    /// a long note and then looking at another does not cost you your place in
+    /// the first.
+    ///
+    /// Kept here rather than in the renderer because `App` already owns the
+    /// wrap that a click on text goes through: an offset only the renderer knew
+    /// would put clicks on the wrong row the moment the text moved. Kept out of
+    /// the note itself because where you are reading is this session's
+    /// business, not something to carry between machines.
+    scroll: HashMap<u64, usize>,
     drag: Option<Drag>,
     /// The board viewport from the last render, needed to interpret mouse
     /// positions and to center content. Zero until the first draw.
@@ -306,7 +326,7 @@ impl App {
             glide: None,
             help: false,
             editor: None,
-            edit_scroll: 0,
+            scroll: HashMap::new(),
             drag: None,
             viewport: Rect::default(),
             tabs: Rect::default(),
@@ -411,10 +431,15 @@ impl App {
     }
     /// The live note editor, for the renderer to draw with a cursor. `Some`
     /// only while editing.
-    /// How many wrapped rows are scrolled off the top of the note being
-    /// edited. The renderer offsets the text by this much.
-    pub fn edit_scroll(&self) -> usize {
-        self.edit_scroll
+    /// How many wrapped rows sit above the top of this note's text area. The
+    /// renderer offsets the text by this much, and clamping happens here so a
+    /// note whose text shrank cannot leave its window stranded past the end.
+    pub fn scroll_of(&self, id: u64) -> usize {
+        self.scroll
+            .get(&id)
+            .copied()
+            .unwrap_or(0)
+            .min(self.max_scroll_of(id))
     }
 
     pub fn editor(&self) -> Option<&TextEditor> {
@@ -675,6 +700,8 @@ impl App {
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('q') => self.quit(),
             KeyCode::Esc => self.selected = None,
+            KeyCode::PageDown => self.page_selected(true),
+            KeyCode::PageUp => self.page_selected(false),
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_at_center(true),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_at_center(false),
             KeyCode::Char('n') => self.new_note(),
@@ -934,7 +961,10 @@ impl App {
             format!("{}\n{}", note.title, note.body)
         };
         self.editor = Some(TextEditor::new(&text));
-        self.edit_scroll = 0;
+        // The editor lays the note out as one buffer and the read-only view as
+        // title, spacer, body, so a window measured against one does not point
+        // at the same row in the other. `follow_caret` sets it from the caret.
+        self.scroll.remove(&id);
         self.mode = Mode::Edit;
         self.camera.zoom = ZoomLevel::Document;
         // Centre rather than merely clamp: `e` from a zoomed-out board used to
@@ -1143,7 +1173,9 @@ impl App {
             }
         }
         self.editor = None;
-        self.edit_scroll = 0;
+        if let Some(id) = self.selected {
+            self.scroll.remove(&id);
+        }
         self.mode = Mode::Nav;
     }
 
@@ -1349,14 +1381,8 @@ impl App {
             return;
         }
         match m.kind {
-            // Inside a note the wheel moves the text, not the camera. Keys
-            // are already text rather than commands while a note is open -
-            // `-` types a hyphen there, it does not zoom out - so a wheel that
-            // still zoomed was the one gesture that did not follow.
-            MouseEventKind::ScrollUp if self.mode == Mode::Edit => self.scroll_edit(false),
-            MouseEventKind::ScrollDown if self.mode == Mode::Edit => self.scroll_edit(true),
-            MouseEventKind::ScrollUp => self.zoom_at(true, m.column, m.row),
-            MouseEventKind::ScrollDown => self.zoom_at(false, m.column, m.row),
+            MouseEventKind::ScrollUp => self.wheel(false, m.column, m.row),
+            MouseEventKind::ScrollDown => self.wheel(true, m.column, m.row),
             MouseEventKind::Down(MouseButton::Left) => self.mouse_down(m.column, m.row),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(m.column, m.row),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_up(m.column, m.row),
@@ -1493,23 +1519,56 @@ impl App {
         Some((cells, wrap::wrap(editor.lines(), width as usize)))
     }
 
-    /// How many rows of text the note shows at once, and how many it has.
-    /// `None` unless a note is open with room to show anything.
-    fn edit_extent(&self) -> Option<(usize, usize)> {
-        let (cells, wrapped) = self.edit_layout()?;
-        // The text sits inside the note's one-cell border, top and bottom.
+    /// Is this the note currently open in the editor?
+    fn editing(&self, id: u64) -> bool {
+        self.mode == Mode::Edit && self.selected == Some(id) && self.editor.is_some()
+    }
+
+    /// The wrap a note's window moves over: the live editor buffer when it is
+    /// the note being edited, its saved text otherwise. One door, so scrolling,
+    /// hit-testing and drawing cannot end up reading different layouts.
+    fn text_layout(&self, id: u64) -> Option<(CellRect, Wrapped)> {
+        if self.editing(id) {
+            self.edit_layout()
+        } else {
+            self.note_layout(id)
+        }
+    }
+
+    /// A note's saved text, wrapped to its width at the current zoom.
+    fn note_layout(&self, id: u64) -> Option<(CellRect, Wrapped)> {
+        let note = self.active_board().notes.iter().find(|n| n.id == id)?;
+        let cells = self.view().note_cells(note.position());
+        // The text sits inside the note's one-cell border.
+        let width = cells.width.checked_sub(2)?;
+        let lines = note_lines(note, self.zoom());
+        Some((cells, wrap::wrap(&lines, width as usize)))
+    }
+
+    /// How many rows of text a note shows at once, and how many it has.
+    /// `None` when there is no room to show anything.
+    fn text_extent(&self, id: u64) -> Option<(usize, usize)> {
+        let (cells, wrapped) = self.text_layout(id)?;
         let height = cells.height.checked_sub(2)? as usize;
         (height > 0).then_some((height, wrapped.rows.len()))
     }
 
-    /// The furthest the text can scroll: far enough to bring the last row to
-    /// the bottom of the window and no further, so scrolling cannot run off
-    /// into blank space under the text.
-    fn max_edit_scroll(&self) -> usize {
-        match self.edit_extent() {
+    /// The furthest a note can scroll: far enough to bring its last row to the
+    /// bottom of the window and no further, so scrolling cannot run off into
+    /// blank space under the text. Zero when everything already fits, which is
+    /// also what makes it the test for "is there anything to scroll here".
+    fn max_scroll_of(&self, id: u64) -> usize {
+        match self.text_extent(id) {
             Some((height, rows)) => rows.saturating_sub(height),
             None => 0,
         }
+    }
+
+    /// Move a note's window, clamped to its text.
+    fn scroll_note(&mut self, id: u64, rows: isize) {
+        let at = self.scroll_of(id) as isize;
+        let to = at.saturating_add(rows).clamp(0, self.max_scroll_of(id) as isize);
+        self.scroll.insert(id, to as usize);
     }
 
     /// Bring the caret back into view after something moved it.
@@ -1518,7 +1577,8 @@ impl App {
     /// enough to catch it. Recentring on every keystroke would make the text
     /// jump under a caret that stepped a single row.
     fn follow_caret(&mut self) {
-        let (Some((cells, wrapped)), Some(editor)) = (self.edit_layout(), self.editor.as_ref())
+        let (Some(id), Some((cells, wrapped)), Some(editor)) =
+            (self.selected, self.edit_layout(), self.editor.as_ref())
         else {
             return;
         };
@@ -1529,29 +1589,60 @@ impl App {
             return;
         }
         let (row, _) = wrapped.place(editor.cursor());
-        if row < self.edit_scroll {
-            self.edit_scroll = row;
-        } else if row >= self.edit_scroll + height {
-            self.edit_scroll = row + 1 - height;
+        let mut at = self.scroll_of(id);
+        if row < at {
+            at = row;
+        } else if row >= at + height {
+            at = row + 1 - height;
         }
         // Text can shrink under the window - a cut, a kill, an undone paste -
         // and leave it parked past the end.
-        self.edit_scroll = self
-            .edit_scroll
-            .min(wrapped.rows.len().saturating_sub(height));
+        self.scroll
+            .insert(id, at.min(wrapped.rows.len().saturating_sub(height)));
     }
 
-    /// Move the text window by a wheel notch, leaving the caret where it is.
+    /// The wheel: over a note with more text than it can show, it moves that
+    /// note's window; anywhere else it zooms the board.
     ///
-    /// Not chasing the caret back is the point: this is how you look up at
-    /// what you wrote without losing the place you are typing. The next
-    /// keystroke brings the caret back into view.
-    fn scroll_edit(&mut self, down: bool) {
-        self.edit_scroll = if down {
-            (self.edit_scroll + SCROLL_STEP).min(self.max_edit_scroll())
+    /// This is the whole rule. A note that is not hiding anything is not a
+    /// scroll target, so the wheel keeps zooming over the vast majority of the
+    /// board and only changes meaning where there is something to reveal.
+    fn wheel(&mut self, down: bool, col: u16, row: u16) {
+        match self.scrollable_at(col, row) {
+            Some(id) => {
+                let rows = if down { WHEEL_ROWS } else { -WHEEL_ROWS };
+                self.scroll_note(id, rows);
+            }
+            None => self.zoom_at(!down, col, row),
+        }
+    }
+
+    /// The note the wheel would scroll, if any.
+    ///
+    /// While a note is open the wheel belongs to it wherever the pointer is:
+    /// you are inside its text, not on the board. Otherwise it is the topmost
+    /// note under the cursor, and only when that note is hiding something.
+    fn scrollable_at(&self, col: u16, row: u16) -> Option<u64> {
+        let id = if self.mode == Mode::Edit {
+            self.selected?
         } else {
-            self.edit_scroll.saturating_sub(SCROLL_STEP)
+            let world = self.view().world_at(col, row);
+            self.active_board().note_at(world)?.id
         };
+        (self.max_scroll_of(id) > 0).then_some(id)
+    }
+
+    /// Page the selected note's text, the keyboard's answer to the wheel.
+    ///
+    /// A page keeps one row of overlap, so there is always a line you have
+    /// already read to land on rather than a wall of new text.
+    fn page_selected(&mut self, down: bool) {
+        let Some(id) = self.selected else { return };
+        let Some((height, _)) = self.text_extent(id) else {
+            return;
+        };
+        let page = height.saturating_sub(1).max(1) as isize;
+        self.scroll_note(id, if down { page } else { -page });
     }
 
     /// Where in the buffer a screen cell points, for a click or drag inside the
@@ -1575,7 +1666,8 @@ impl App {
             }
             (dx, dy)
         };
-        Some(wrapped.locate(dy as usize + self.edit_scroll, dx as usize))
+        let scrolled = dy as usize + self.selected.map_or(0, |id| self.scroll_of(id));
+        Some(wrapped.locate(scrolled, dx as usize))
     }
 
     /// Release: a pin let go over another world's tab lands there. Anything
@@ -3806,9 +3898,8 @@ mod tests {
 
     // ---- scrolling a note longer than itself ----
 
-    /// One pin carrying `rows` short body lines, open in the editor. The caret
-    /// lands where `TextEditor::new` puts it: at the very end of the text.
-    fn editing_a_note_of(rows: usize) -> App {
+    /// One pin carrying `rows` short body lines, on a board of its own.
+    fn board_with_note_of(rows: usize) -> App {
         let body = (1..=rows)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
@@ -3825,6 +3916,13 @@ mod tests {
         });
         let mut a = App::new(vec![board]);
         a.set_viewport(VIEWPORT);
+        a
+    }
+
+    /// That pin, open in the editor. The caret lands where `TextEditor::new`
+    /// puts it: at the very end of the text.
+    fn editing_a_note_of(rows: usize) -> App {
+        let mut a = board_with_note_of(rows);
         let (col, row) = cell_of_note(&a, 1);
         a.on_mouse(mouse_down(col, row));
         a.on_mouse(mouse_up(col, row));
@@ -3835,8 +3933,8 @@ mod tests {
 
     /// The window the note shows: (first visible row, rows that fit).
     fn window(a: &App) -> (usize, usize) {
-        let (height, _) = a.edit_extent().expect("a note is open");
-        (a.edit_scroll(), height)
+        let (height, _) = a.text_extent(1).expect("a note is open");
+        (a.scroll_of(1), height)
     }
 
     /// Which wrapped row the caret sits on.
@@ -3857,8 +3955,8 @@ mod tests {
     #[test]
     fn a_note_that_fits_never_scrolls() {
         let a = editing_a_note_of(2);
-        assert_eq!(a.edit_scroll(), 0);
-        assert_eq!(a.max_edit_scroll(), 0, "there is nothing below to reach");
+        assert_eq!(a.scroll_of(1), 0);
+        assert_eq!(a.max_scroll_of(1), 0, "there is nothing below to reach");
     }
 
     #[test]
@@ -3878,10 +3976,10 @@ mod tests {
     #[test]
     fn the_window_holds_still_while_the_caret_moves_inside_it() {
         let mut a = editing_a_note_of(40);
-        let before = a.edit_scroll();
+        let before = a.scroll_of(1);
         a.on_key(key(KeyCode::Up));
         assert_eq!(
-            a.edit_scroll(),
+            a.scroll_of(1),
             before,
             "a step the window already shows must not move the text"
         );
@@ -3906,11 +4004,11 @@ mod tests {
     #[test]
     fn typing_past_the_last_visible_row_follows_the_caret_down() {
         let mut a = editing_a_note_of(40);
-        let before = a.edit_scroll();
+        let before = a.scroll_of(1);
         for _ in 0..5 {
             a.on_key(key(KeyCode::Enter));
         }
-        assert!(a.edit_scroll() > before, "new rows must not push the caret out of sight");
+        assert!(a.scroll_of(1) > before, "new rows must not push the caret out of sight");
         let (top, height) = window(&a);
         assert!((top..top + height).contains(&caret_row(&a)));
     }
@@ -3918,11 +4016,11 @@ mod tests {
     #[test]
     fn the_wheel_moves_the_text_and_leaves_the_caret_alone() {
         let mut a = editing_a_note_of(40);
-        let before = a.edit_scroll();
+        let before = a.scroll_of(1);
         let caret = a.editor().unwrap().cursor();
         let (col, row) = cell_of_note(&a, 1);
         a.on_mouse(wheel(false, col, row));
-        assert_eq!(a.edit_scroll(), before - SCROLL_STEP);
+        assert_eq!(a.scroll_of(1), before - WHEEL_ROWS as usize);
         assert_eq!(
             a.editor().unwrap().cursor(),
             caret,
@@ -3949,12 +4047,12 @@ mod tests {
         for _ in 0..50 {
             a.on_mouse(wheel(false, col, row));
         }
-        assert_eq!(a.edit_scroll(), 0, "the top is as far up as it goes");
+        assert_eq!(a.scroll_of(1), 0, "the top is as far up as it goes");
         for _ in 0..50 {
             a.on_mouse(wheel(true, col, row));
         }
         let (top, height) = window(&a);
-        let (_, rows) = a.edit_extent().unwrap();
+        let (_, rows) = a.text_extent(1).unwrap();
         assert_eq!(
             top,
             rows - height,
@@ -3986,7 +4084,7 @@ mod tests {
     fn a_click_lands_on_the_row_the_scroll_put_under_it() {
         let mut a = editing_a_note_of(40);
         let (cells, _) = a.edit_layout().unwrap();
-        let top = a.edit_scroll();
+        let top = a.scroll_of(1);
         assert!(top > 0, "the point of the test is a scrolled note");
         // The first row inside the border, which is row `top` of the text.
         a.on_mouse(mouse_down(
@@ -4003,10 +4101,134 @@ mod tests {
     #[test]
     fn closing_a_note_puts_the_window_back_to_the_top() {
         let mut a = editing_a_note_of(40);
-        assert!(a.edit_scroll() > 0);
+        assert!(a.scroll_of(1) > 0);
         a.on_key(key(KeyCode::Esc));
         assert_eq!(a.mode(), Mode::Nav);
-        assert_eq!(a.edit_scroll(), 0, "the next note opens at its own top");
+        assert_eq!(a.scroll_of(1), 0, "the next note opens at its own top");
+    }
+
+    // ---- the wheel picks its target by what is under it ----
+
+    /// One pin of `rows` body lines, at document zoom, nothing selected and
+    /// nothing open: the reading case.
+    fn viewing_a_note_of(rows: usize) -> App {
+        let mut a = board_with_note_of(rows);
+        a.on_key(key(KeyCode::Char('+')));
+        a.on_key(key(KeyCode::Char('+')));
+        assert_eq!(a.zoom(), ZoomLevel::Document, "the body has to be drawn");
+        a
+    }
+
+    /// A cell on the board with no note under it.
+    fn empty_cell(a: &App) -> (u16, u16) {
+        let (col, row) = (a.viewport.x + 1, a.viewport.y + 1);
+        let world = a.view().world_at(col, row);
+        assert!(
+            a.active_board().note_at(world).is_none(),
+            "this corner should be bare board"
+        );
+        (col, row)
+    }
+
+    #[test]
+    fn the_wheel_over_a_long_note_scrolls_it_and_leaves_the_zoom_alone() {
+        let mut a = viewing_a_note_of(40);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(wheel(true, col, row));
+        assert_eq!(a.scroll_of(1), WHEEL_ROWS as usize, "the note moved");
+        assert_eq!(a.zoom(), ZoomLevel::Document, "the board did not");
+    }
+
+    #[test]
+    fn the_wheel_over_the_board_still_zooms() {
+        let mut a = viewing_a_note_of(40);
+        let (col, row) = empty_cell(&a);
+        a.on_mouse(wheel(true, col, row));
+        assert_eq!(a.zoom(), ZoomLevel::Preview, "bare board is the camera's");
+        assert_eq!(a.scroll_of(1), 0, "and no note moved");
+    }
+
+    #[test]
+    fn the_wheel_over_a_note_with_nothing_hidden_zooms() {
+        // A note that fits is not a scroll target. Swallowing the wheel there
+        // would make it dead over most of the board.
+        let mut a = viewing_a_note_of(1);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(wheel(true, col, row));
+        assert_eq!(a.zoom(), ZoomLevel::Preview);
+    }
+
+    #[test]
+    fn a_zoom_level_that_draws_no_body_is_not_a_scroll_target() {
+        // At titles zoom the note shows one line, so there is nothing to
+        // reveal and the wheel belongs to the camera.
+        let mut a = board_with_note_of(40);
+        assert_eq!(a.zoom(), ZoomLevel::Titles);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(wheel(false, col, row));
+        assert_eq!(a.zoom(), ZoomLevel::Preview);
+        assert_eq!(a.scroll_of(1), 0);
+    }
+
+    #[test]
+    fn each_note_keeps_its_own_place() {
+        let mut a = viewing_a_note_of(40);
+        // A second long pin, well clear of the first.
+        let body = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        a.boards[0].notes.push(Note {
+            id: 2,
+            title: "another".into(),
+            body,
+            x: 400.0,
+            y: 0.0,
+            z: 2,
+            color: Color::Yellow,
+        });
+        let first = cell_of_note(&a, 1);
+        let second = cell_of_note(&a, 2);
+        a.on_mouse(wheel(true, first.0, first.1));
+        a.on_mouse(wheel(true, second.0, second.1));
+        a.on_mouse(wheel(true, second.0, second.1));
+        assert_eq!(a.scroll_of(1), WHEEL_ROWS as usize);
+        assert_eq!(a.scroll_of(2), 2 * WHEEL_ROWS as usize, "one window each");
+    }
+
+    #[test]
+    fn a_shrunken_note_does_not_stay_scrolled_past_its_end() {
+        let mut a = viewing_a_note_of(40);
+        let (col, row) = cell_of_note(&a, 1);
+        for _ in 0..20 {
+            a.on_mouse(wheel(true, col, row));
+        }
+        assert!(a.scroll_of(1) > 0);
+        a.boards[0].notes[0].body = "one line".into();
+        assert_eq!(a.scroll_of(1), 0, "the window follows the text back up");
+    }
+
+    #[test]
+    fn page_keys_move_the_selected_note_a_screen_at_a_time() {
+        let mut a = viewing_a_note_of(40);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_mouse(mouse_down(col, row));
+        a.on_mouse(mouse_up(col, row));
+        assert_eq!(a.selected(), Some(1));
+        let (height, _) = a.text_extent(1).unwrap();
+        a.on_key(key(KeyCode::PageDown));
+        assert_eq!(
+            a.scroll_of(1),
+            height - 1,
+            "a page keeps one row of overlap to land on"
+        );
+        a.on_key(key(KeyCode::PageUp));
+        assert_eq!(a.scroll_of(1), 0);
+    }
+
+    #[test]
+    fn page_keys_do_nothing_with_no_pin_selected() {
+        let mut a = viewing_a_note_of(40);
+        a.on_key(key(KeyCode::PageDown));
+        assert_eq!(a.scroll_of(1), 0);
+        assert_eq!(a.zoom(), ZoomLevel::Document, "and they are not a zoom");
     }
 
     // helpers that reach into private state for assertions

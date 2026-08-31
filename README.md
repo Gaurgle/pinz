@@ -148,8 +148,9 @@ carries news instead: what a drag is about to do, what was copied, why a board
 is read-only.
 
 The same list in prose: **scroll** or `+`/`-` to zoom through the levels of
-detail (scroll zooms about the cursor, except in a note you are editing, where
-it scrolls that note's text; `+`/`-` about the selected pin, which
+detail (scroll zooms about the cursor, unless the cursor is over a pin with
+more text than it can show, where it scrolls that pin instead; `+`/`-` about
+the selected pin, which
 ends up centered, or the middle of the view when nothing is selected), **drag a
 note** to move it, **drag the board** to pan (arrow keys too),
 `Tab` or `1`-`9` to switch worlds (or click a tab), `w` or the `+` in the tab
@@ -160,12 +161,17 @@ for a new note, `shift`+arrows (or `shift`+`h`/`j`/`k`/`l`) to step the
 selection between pins, `e` or `enter` to edit the selected note (which zooms in
 and centers it; first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
-`ctrl`+`u` clears the line, `esc` saves; a note longer than it is tall scrolls,
-with the wheel or by moving the caret past an edge, and shows a thumb on its
-right border while there is more),
+`ctrl`+`u` clears the line, `esc` saves; the note scrolls with the wheel or by
+moving the caret past an edge),
 `y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
 `u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
 the active one is named in the header), `q` to quit.
+
+A pin holding more text than it can show scrolls where it lies, open or not:
+put the pointer on it and use the wheel, or `page up`/`page down` on the
+selected pin. It draws a thumb on its right border while there is more, and a
+pin with nothing hidden is not a scroll target at all, so the wheel goes on
+zooming the board everywhere else.
 
 ### Deleting a world
 

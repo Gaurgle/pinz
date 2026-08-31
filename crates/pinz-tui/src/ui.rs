@@ -19,7 +19,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, Prompt, TabKind};
+use crate::app::{note_lines, App, Mode, Prompt, TabKind};
 use crate::editor::TextEditor;
 use crate::theme::Theme;
 use crate::view::{CellRect, View};
@@ -90,6 +90,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("shift + ← ↑ → ↓", "step between pins"),
             ("shift + h j k l", "the same"),
             ("u / ctrl+r", "undo, redo"),
+            ("scroll, pg up/dn", "read a long pin"),
         ],
     ),
     (
@@ -495,36 +496,23 @@ fn draw_note_widget(
             return;
         }
 
-        // While editing, the whole note is one live buffer (line 1 = title, the
-        // rest = body), word-wrapped to the inner width with the cursor mapped
-        // through the wrap so text never runs off the right edge.
-        if let Some(editor) = editing.then(|| app.editor()).flatten() {
-            let lines = editor_lines(editor, inner.width as usize, theme);
-            let rows = lines.len();
-            // A note is a fixed size, so a long one is read through a moving
-            // window rather than by growing the note. `App` owns where that
-            // window sits, because a click on text is resolved against it too.
-            let scroll = app.edit_scroll().min(u16::MAX as usize) as u16;
-            Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
-            draw_text_bar(buf, full, inner, app.edit_scroll(), rows, theme.overlay0);
-            return;
-        }
-
-        // Not editing: the title, then (from preview level up) the body. The body
-        // is split on its own newlines first - a Line renders an embedded '\n' as
-        // nothing, so passing the raw body would silently glue the rows together
-        // the moment the editor closes.
-        let mut lines = vec![Line::from(Span::styled(
-            note.title.clone(),
-            Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD),
-        ))];
-        if matches!(lod, ZoomLevel::Preview | ZoomLevel::Document) && !note.body.is_empty() {
-            lines.push(Line::raw(""));
-            lines.extend(body_lines(&note.body, theme.note_fg));
-        }
+        // Editing: the whole note is one live buffer (line 1 = title, the rest
+        // = body), with the caret and selection mapped through the wrap.
+        // Otherwise the saved text, through the same wrap, so what a scroll
+        // and a click are measured against is exactly what was drawn.
+        let lines = match editing.then(|| app.editor()).flatten() {
+            Some(editor) => editor_lines(editor, inner.width as usize, theme),
+            None => saved_lines(note, lod, inner.width as usize, theme),
+        };
+        // A note is a fixed size, so a long one is read through a moving window
+        // rather than by growing the note. `App` owns where that window sits,
+        // because a click on text is resolved against it too.
+        let offset = app.scroll_of(note.id);
+        let rows = lines.len();
         Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
+            .scroll((offset.min(u16::MAX as usize) as u16, 0))
             .render(inner, buf);
+        draw_text_bar(buf, full, inner, offset, rows, theme.overlay0);
     });
 }
 
@@ -600,12 +588,19 @@ fn paint_clipped(frame: &mut Frame, cells: CellRect, area: Rect, render: impl Fn
     }
 }
 
-/// A note body as one [`Line`] per hard line break, so the rows a writer typed
-/// survive into the read-only view. Long rows still soft-wrap: the caller's
-/// [`Wrap`] handles each line on its own.
-fn body_lines(body: &str, fg: ratatui::style::Color) -> Vec<Line<'static>> {
-    body.split('\n')
-        .map(|row| Line::from(Span::styled(row.to_string(), Style::new().fg(fg))))
+/// A note that is not being edited, as the rows it draws: the title, a spacer,
+/// then the body, wrapped through `wrap.rs`.
+///
+/// The wrap is `wrap.rs` rather than ratatui's own `Wrap` for one reason: this
+/// is the layout the note's scroll offset is measured in, and `App` computes
+/// that from `note_lines` through the same function. Two wrappers would mean
+/// the row a wheel notch moves to and the row on screen slowly disagreeing.
+fn saved_lines(note: &Note, lod: ZoomLevel, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let logical = note_lines(note, lod);
+    wrap::wrap(&logical, width)
+        .rows
+        .iter()
+        .map(|row| row_line(&row.text, row.line == 0, theme, None, None))
         .collect()
 }
 
@@ -1068,6 +1063,73 @@ mod tests {
             !short.contains('\u{2590}'),
             "a note that fits should look exactly as it always did:\n{short}"
         );
+    }
+
+    #[test]
+    fn a_long_note_nobody_is_editing_scrolls_and_says_so() {
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+        };
+        let mut store = MemoryStore::seeded();
+        let mut boards = store.load().unwrap();
+        boards[0].notes.clear();
+        boards[0].notes.push(pinz_core::Note {
+            id: 900,
+            title: "TITLE".into(),
+            body: (1..=40).map(|i| format!("row{i}")).collect::<Vec<_>>().join("\n"),
+            x: 0.0,
+            y: 0.0,
+            z: 1,
+            color: pinz_core::Color::Yellow,
+        });
+        let mut app = App::new(boards);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let press = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        // Zoom to document with the pin selected but nothing open: the reading
+        // case, where the wheel used to be no use at all.
+        app.on_key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        });
+        app.on_key(press(KeyCode::Char('+')));
+        app.on_key(press(KeyCode::Char('+')));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.mode(), crate::app::Mode::Nav, "nothing is being edited");
+        let before = buffer_text(&terminal.backend().buffer().clone());
+        assert!(before.contains("TITLE"), "the note starts at its top:\n{before}");
+        assert!(
+            before.contains('\u{2590}'),
+            "and says it is hiding something:\n{before}"
+        );
+
+        // The wheel over the note itself, which is what picks it as the target.
+        let note = app.active_board().notes[0].clone();
+        let view = View::new(app.camera(), app.viewport());
+        let (cx, cy) = view.cell_of(note.center());
+        let (col, row) = (
+            app.viewport().x + cx.round() as u16,
+            app.viewport().y + cy.round() as u16,
+        );
+        for _ in 0..15 {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: col,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let after = buffer_text(&terminal.backend().buffer().clone());
+        assert!(!after.contains("TITLE"), "the top scrolled away:\n{after}");
+        assert!(after.contains("row40"), "and the end came into view:\n{after}");
     }
 
     #[test]
