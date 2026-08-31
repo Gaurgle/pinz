@@ -72,7 +72,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "board",
         &[
-            ("scroll / + -", "zoom"),
+            ("scroll board", "zoom"),
+            ("+ / -", "zoom, on the pin"),
             ("drag", "pan the board"),
             ("← ↑ → ↓", "pan a step"),
             ("esc", "clear selection"),
@@ -90,7 +91,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("shift + ← ↑ → ↓", "step between pins"),
             ("shift + h j k l", "the same"),
             ("u / ctrl+r", "undo, redo"),
-            ("scroll, pg up/dn", "read a long pin"),
+            ("scroll a pin", "read down it"),
+            ("page up / down", "the same, selected"),
         ],
     ),
     (

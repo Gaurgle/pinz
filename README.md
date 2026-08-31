@@ -170,12 +170,22 @@ A pin holding more text than it can show scrolls where it lies, open or not:
 put the pointer on it and use the wheel, or `page up`/`page down` on the
 selected pin. It draws a thumb on its right border while there is more.
 
-Which gesture the wheel is depends on what is under the pointer, not on what
-the pin says: from preview zoom up, a pin takes the wheel and a short one
-simply has nowhere to go, so the wheel never zooms the board out from under a
-pin you were reading. Over bare board it zooms as always, and at cluster and
-titles zoom - where pins cover the screen and there is no body drawn to read -
-it zooms everywhere.
+Which gesture the wheel is depends on what is under the pointer, never on how
+much someone wrote:
+
+| Pointer is on | Zoom level | The wheel |
+| ------------- | ---------- | --------- |
+| a pin | preview or document | scrolls that pin; a short one has nowhere to go |
+| bare board | preview or document | zooms |
+| anything | cluster or titles | zooms |
+
+A short pin absorbing the wheel is the point rather than an oversight: the
+board never lurches out from under a pin you were reading, and you do not have
+to know how much text a pin holds to know what the wheel will do. The
+exception is about the zoom level, not the contents. Cluster and titles draw
+no body to read and are the levels where pins cover the screen, so a wheel
+that died on every one of them would leave a full board impossible to zoom out
+of with the mouse.
 
 ### Deleting a world
 
