@@ -125,8 +125,13 @@ that state calls for:
 | `pinz status` (`st`) | reports what is waiting and changes nothing |
 | `pinz pull` | only brings the other machine's pins in |
 | `pinz push` | only commits and sends this machine's pins |
-| `pinz version` | prints the version - worth checking that both machines match |
+| `pinz version` | prints this build and the newest release, and whether they match |
 | `pinz help` | the above, from the tool itself |
+
+`pinz version` reads the release tags off the source repo with `git ls-remote`,
+so it answers three things at once: what this machine runs, what has shipped,
+and whether you are level, behind, or on a build that was never released. With
+no network it says `unknown` for the release and still prints your build.
 
 Two flags: `--no-sync` opens the board without touching git at all, and
 `--theme <name>` (or a bare theme name) picks the starting theme.
