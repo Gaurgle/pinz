@@ -38,15 +38,35 @@ notes out of the source repo is the point - see [Where pins live](#where-pins-li
 
 ### 1. Install the program
 
-The same on every machine:
+**Homebrew** (macOS and Linux, prebuilt, no toolchain needed):
+
+```sh
+brew install Gaurgle/tap/pinz
+```
+
+**Cargo**, if you already have Rust:
+
+```sh
+cargo install pinz
+```
+
+**From a checkout**, for hacking on it:
 
 ```sh
 git clone git@github.com:<you>/pinz.git ~/repos/pinz
 cargo install --path ~/repos/pinz/crates/pinz-tui    # puts `pinz` on your PATH
 ```
 
-`--path` has to name the crate, not the repo root: the root is a workspace
-manifest with no package in it, and cargo will say so.
+`--path` has to name the crate directory, not the repo root: the root is a
+workspace manifest with no package in it, and cargo will say so. The directory
+is `pinz-tui` while the package it holds is published as `pinz`, because the
+core is built for several renderers and only one of them is a terminal.
+
+Building from source needs Rust 1.88 or newer (the floor the workspace
+declares) and git. Prebuilt binaries for macOS on Apple silicon and Intel, and
+for x86-64 Linux, are attached to every [release][releases].
+
+[releases]: https://github.com/Gaurgle/pinz/releases
 
 ### 2. Get your pins
 
@@ -349,3 +369,14 @@ over automatically.
 Pins are deliberately separate from your notez2 notes. A pin that turns out to
 matter is meant to graduate into a real note later; nothing here reads or writes
 a notez2 workspace.
+
+## License
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you state otherwise, any contribution you intentionally
+submit for inclusion in this work shall be dual-licensed as above, with no
+additional terms.
