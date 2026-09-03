@@ -27,7 +27,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup update stable && rustup default stable
       - run: cargo --version && rustc --version
       # --locked: build the dependency versions Cargo.lock names, so CI fails
@@ -37,7 +37,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup update stable && rustup default stable && rustup component add clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -45,7 +45,7 @@ jobs:
     name: builds on the declared rust-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Kept in step with `rust-version` in the workspace manifest. If this job
       # fails, either the code moved past the floor or the floor needs raising.
       - run: rustup toolchain install 1.88.0 --profile minimal
