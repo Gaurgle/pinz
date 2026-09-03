@@ -48,7 +48,9 @@ Pushing the tag starts the release workflow, which:
 
 1. opens a draft release for the tag if one does not exist,
 2. builds `pinz` for macOS arm64, macOS x86-64 and Linux x86-64, and attaches
-   a `.tar.gz` and a `.sha256` for each,
+   a `.tar.gz` and a `.sha256` for each (both mac targets build on Apple
+   silicon; the Intel one is cross-compiled, because GitHub's Intel macOS
+   runners are being retired and queue badly),
 3. renders `pinz.rb` from those checksums and attaches it too.
 
 If the tag already went out without assets, run the workflow by hand instead:
