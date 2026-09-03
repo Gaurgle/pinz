@@ -1491,6 +1491,19 @@ impl App {
             return;
         };
         let mut note = self.boards[self.active].notes.remove(at);
+        // Worlds do not share a coordinate space, so the pin's old x and y mean
+        // nothing here: keeping them can strand it far outside the cloud this
+        // board frames. Land it in the middle, clear of what is already there.
+        let center = self.boards[target].content_center();
+        let spot = self.boards[target].free_spot(
+            WorldPoint {
+                x: center.x - NOTE_W / 2.0,
+                y: center.y - NOTE_H / 2.0,
+            },
+            None,
+        );
+        note.x = spot.x;
+        note.y = spot.y;
         note.z = self.boards[target]
             .notes
             .iter()
@@ -1679,12 +1692,39 @@ impl App {
     /// else just ends the gesture.
     fn mouse_up(&mut self, col: u16, row: u16) {
         if let Some(Drag::Note { id, .. }) = self.drag {
-            if let Some(world) = self.world_at_point(col, row) {
-                self.move_note_to_board(id, world);
+            match self.world_at_point(col, row) {
+                Some(world) => self.move_note_to_board(id, world),
+                None => self.settle_note(id),
             }
         }
         self.drag = None;
         self.drop_target = None;
+    }
+
+    /// Nudge a just-dropped pin clear of anything it would hide.
+    ///
+    /// Done on release rather than inside [`Self::mouse_drag`] on purpose: a
+    /// dragged pin tracks the cursor 1:1, and a cascade running mid-gesture
+    /// would have it squirming out from under the pointer. It settles once,
+    /// when you let go, inside the same undo step as the drag.
+    fn settle_note(&mut self, id: u64) {
+        let Some(at) = self
+            .active_board()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.position())
+        else {
+            return;
+        };
+        let spot = self.active_board().free_spot(at, Some(id));
+        if spot == at {
+            return; // clear already; don't bump `revision` for a no-op
+        }
+        if let Some(note) = self.note_mut(id) {
+            note.x = spot.x;
+            note.y = spot.y;
+        }
     }
 
     fn mouse_drag(&mut self, col: u16, row: u16) {
@@ -1856,23 +1896,7 @@ impl App {
     /// Bounding box of the active board's notes (top-left min, bottom-right
     /// max), or `None` when the board is empty.
     fn content_bounds(&self) -> Option<(WorldPoint, WorldPoint)> {
-        let notes = &self.active_board().notes;
-        let first = notes.first()?;
-        let mut min = WorldPoint {
-            x: first.x,
-            y: first.y,
-        };
-        let mut max = WorldPoint {
-            x: first.x + NOTE_W,
-            y: first.y + NOTE_H,
-        };
-        for n in notes {
-            min.x = min.x.min(n.x);
-            min.y = min.y.min(n.y);
-            max.x = max.x.max(n.x + NOTE_W);
-            max.y = max.y.max(n.y + NOTE_H);
-        }
-        Some((min, max))
+        self.active_board().bounds()
     }
 
     fn center_on_content(&mut self) {
@@ -1880,13 +1904,7 @@ impl App {
         // space between where you were and here to travel through.
         self.glide = None;
         let (sx, sy) = self.view().scale();
-        let center = match self.content_bounds() {
-            Some((min, max)) => WorldPoint {
-                x: (min.x + max.x) / 2.0,
-                y: (min.y + max.y) / 2.0,
-            },
-            None => WorldPoint { x: 0.0, y: 0.0 },
-        };
+        let center = self.active_board().content_center();
         self.camera.origin = WorldPoint {
             x: center.x - (self.viewport.width as f64 / 2.0) / sx,
             y: center.y - (self.viewport.height as f64 / 2.0) / sy,
@@ -1926,6 +1944,9 @@ impl App {
             x: self.camera.origin.x + (self.viewport.width as f64 / 2.0) / sx - NOTE_W / 2.0,
             y: self.camera.origin.y + (self.viewport.height as f64 / 2.0) / sy - NOTE_H / 2.0,
         };
+        // Two notes made without panning would otherwise share one spot
+        // exactly, and the older one would be gone behind the newer.
+        let center = self.active_board().free_spot(center, None);
         let color = Color::ALL[self.color_tick % Color::ALL.len()];
         self.color_tick += 1;
         let top = self
@@ -2004,6 +2025,7 @@ mod tests {
     use super::*;
     use pinz_core::MemoryStore;
     use pinz_core::Store;
+    use pinz_core::{CASCADE_X, CASCADE_Y};
     use ratatui::crossterm::event::{KeyEventKind, KeyEventState};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2485,6 +2507,48 @@ mod tests {
         assert!(a.selected().is_some());
         assert_eq!(a.mode(), Mode::Edit);
         assert_eq!(a.zoom(), ZoomLevel::Document);
+    }
+
+    /// Two pins closer than one cascade step on *both* axes hide each other,
+    /// and become the same pin outright once positions round on the way to
+    /// disk. No board may ever hold such a pair.
+    fn assert_nothing_is_stacked(board: &Board) {
+        for (i, a) in board.notes.iter().enumerate() {
+            for b in &board.notes[i + 1..] {
+                assert!(
+                    (a.x - b.x).abs() >= CASCADE_X || (a.y - b.y).abs() >= CASCADE_Y,
+                    "{:?} and {:?} are stacked at ({}, {}) and ({}, {})",
+                    a.title,
+                    b.title,
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_fresh_notes_do_not_land_on_the_same_spot() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        assert_nothing_is_stacked(a.active_board());
+    }
+
+    #[test]
+    fn a_pin_dropped_on_another_settles_clear_of_it() {
+        let mut a = app();
+        let target = a.active_board().notes[1].clone();
+        let (tc, tr) = cell_of_note(&a, target.id);
+        let id = drag_first_pin_to(&mut a, tc, tr);
+        a.on_mouse(mouse_up(tc, tr));
+
+        assert_ne!(id, target.id, "the drag must grab a different pin");
+        assert_nothing_is_stacked(a.active_board());
     }
 
     #[test]
@@ -3766,11 +3830,23 @@ mod tests {
         );
     }
 
+    /// Worlds do not share a coordinate space: a pin keeping its old x and y
+    /// can land arbitrarily far from the board it arrives on, and since the
+    /// camera frames the *union* of a board's pins, that strands both the pin
+    /// and everything already there. It lands in the middle instead, cascaded
+    /// clear of whatever the middle already holds.
     #[test]
-    fn a_dropped_pin_keeps_its_coordinates_and_lands_on_top() {
+    fn a_dropped_pin_lands_in_the_middle_of_the_world_it_arrives_in() {
         let mut a = with_tabs();
         let note = a.active_board().notes[0].clone();
         let top_before = a.boards()[1].notes.iter().map(|n| n.z).max().unwrap_or(0);
+        let center = a.boards()[1].content_center();
+        let wanted = WorldPoint {
+            x: center.x - NOTE_W / 2.0,
+            y: center.y - NOTE_H / 2.0,
+        };
+        let expected = a.boards()[1].free_spot(wanted, None);
+
         let (tc, tr) = cell_of_tab(&a, 1);
         drag_first_pin_to(&mut a, tc, tr);
         a.on_mouse(mouse_up(tc, tr));
@@ -3782,13 +3858,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             (moved.x, moved.y),
-            (note.x, note.y),
-            "coordinates preserved"
+            (expected.x, expected.y),
+            "should land at the target board's centre, not keep its old spot"
         );
         assert!(
             moved.z > top_before,
             "should sit on top of the target board"
         );
+        assert_nothing_is_stacked(&a.boards()[1]);
     }
 
     #[test]

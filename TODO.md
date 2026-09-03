@@ -29,10 +29,18 @@ lives in `design/DESIGN.md`; this is the running list of what's next.
 - Move a pin to another board *from the keyboard*. Dragging it onto the target
   world's tab is done; there is no equivalent for a keyboard-only session.
 - Re-center the board on terminal resize.
-- Pile / stacking cascade when notes are dropped together.
+- ~~Pile / stacking cascade when notes are dropped together.~~ Built 2026-09-03:
+  every placement goes through `Board::free_spot`, and a pin dragged to another
+  world lands in the middle of it rather than keeping coordinates that mean
+  nothing there.
 
 ## Sync
 
+- **De-stack on load.** `free_spot` guards every placement made inside the app,
+  but `merge.rs` resolves each pin file on its own and never sees its
+  neighbours, so two machines can still produce two pins at one spot. Fixing it
+  means moving pins as a side effect of opening a board, which rewrites files
+  nobody touched - decide whether that is acceptable before building it.
 - Sync while running, for a board left open for days. Pins are written to disk
   immediately, but only pushed on quit. Design it together with the read-only
   second instance below - a read-only board that never reloads is the same
