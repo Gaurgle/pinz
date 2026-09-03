@@ -21,3 +21,10 @@ categories = ["command-line-utilities", "text-editors"]
 # rather than pinning a separate crossterm that could drift out of sync.
 [workspace.dependencies]
 ratatui = "0.30"
+# The core, declared once. Both the path (used inside this workspace) and the
+# version (what a published `pinz` depends on) live here, next to the workspace
+# version they must match, so a release bump touches two adjacent lines instead
+# of three scattered ones. Cargo enforces the match: a path dependency whose
+# version requirement misses the crate beside it fails to resolve, so drift
+# breaks the build rather than the publish.
+pinz-core = { path = "crates/pinz-core", version = "0.5.1" }

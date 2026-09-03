@@ -20,12 +20,10 @@ name = "pinz"
 path = "src/main.rs"
 
 [dependencies]
-# crates.io needs a version alongside the path: the path is used in this
-# workspace, the version is what a published `pinz` depends on.
-pinz-core = { path = "../pinz-core", version = "0.5.1" }
+pinz-core = { workspace = true }
 ratatui = { workspace = true }
 
 [dev-dependencies]
 # The demo boards are a test-only fixture; enabling the feature here keeps it
 # out of the shipped `pinz` binary.
-pinz-core = { path = "../pinz-core", version = "0.5.1", features = ["fixtures"] }
+pinz-core = { workspace = true, features = ["fixtures"] }
