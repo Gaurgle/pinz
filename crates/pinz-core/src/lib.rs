@@ -21,4 +21,4 @@ pub use geometry::{Camera, Projection, ScreenPoint, WorldPoint, ZoomLevel};
 pub use model::{Board, Color, Note, CASCADE_X, CASCADE_Y, NOTE_H, NOTE_W};
 pub use release::{latest_release, Standing, Version};
 pub use store::{MemoryStore, Store, StoreError};
-pub use sync::{Sync, SyncOutcome};
+pub use sync::{clone_into, Sync, SyncOutcome};

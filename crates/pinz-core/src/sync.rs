@@ -167,6 +167,16 @@ impl Sync {
         Some((behind, ahead))
     }
 
+    /// How many commits the current branch carries. Zero for a directory that
+    /// is not a repo, and zero for a repo whose first commit has not happened
+    /// yet - `init` makes the repo, the first `sync` makes the commit.
+    pub fn commit_count(&self) -> u32 {
+        self.git(&["rev-list", "--count", "HEAD"])
+            .filter(|r| r.ok)
+            .and_then(|r| r.stdout.parse().ok())
+            .unwrap_or(0)
+    }
+
     /// Ask the remote what it has, without changing anything locally. Failure
     /// here means offline or no remote, which is never fatal.
     pub fn fetch(&self) -> SyncOutcome {
@@ -454,6 +464,26 @@ fn first_line(s: &str) -> &str {
     s.lines().find(|l| !l.trim().is_empty()).unwrap_or(s).trim()
 }
 
+/// Clone a pin repo from `url` into `dest`, which must not exist yet.
+///
+/// A free function rather than a method: every other git operation here acts
+/// on a board that is already on disk, and this one is what puts it there.
+pub fn clone_into(url: &str, dest: &Path) -> SyncOutcome {
+    if dest.exists() {
+        return SyncOutcome::Stopped(format!("{} already exists", dest.display()));
+    }
+    let out = Command::new("git").arg("clone").arg(url).arg(dest).output();
+    match out {
+        Ok(o) if o.status.success() => SyncOutcome::Done(format!("cloned into {}", dest.display())),
+        // git already says why in a sentence a person can act on; passing it
+        // through beats paraphrasing a message we did not write.
+        Ok(o) => {
+            SyncOutcome::Stopped(first_line(&String::from_utf8_lossy(&o.stderr)).to_string())
+        }
+        Err(e) => SyncOutcome::Stopped(format!("could not run git: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +543,54 @@ mod tests {
         assert!(!sync.is_repo());
         assert!(matches!(sync.pull(), SyncOutcome::Idle(_)));
         assert!(matches!(sync.push("x"), SyncOutcome::Idle(_)));
+    }
+
+    #[test]
+    fn commit_count_counts_what_is_on_the_branch() {
+        let t = Temp::new("count");
+        init_repo(t.path());
+        let sync = Sync::new(t.path());
+        assert_eq!(sync.commit_count(), 0, "nothing committed yet");
+        write_pin(t.path(), "ideas", "one.md", "# one");
+        assert!(matches!(sync.commit("first"), SyncOutcome::Done(_)));
+        assert_eq!(sync.commit_count(), 1);
+        write_pin(t.path(), "ideas", "two.md", "# two");
+        assert!(matches!(sync.commit("second"), SyncOutcome::Done(_)));
+        assert_eq!(sync.commit_count(), 2);
+    }
+
+    #[test]
+    fn commit_count_is_zero_for_a_directory_that_is_not_a_repo() {
+        let t = Temp::new("count-norepo");
+        assert_eq!(Sync::new(t.path()).commit_count(), 0);
+    }
+
+    #[test]
+    fn clone_into_brings_a_board_down_from_a_url() {
+        let src = Temp::new("clone-src");
+        init_repo(src.path());
+        write_pin(src.path(), "ideas", "one.md", "# one");
+        assert!(matches!(
+            Sync::new(src.path()).commit("seed"),
+            SyncOutcome::Done(_)
+        ));
+
+        let parent = Temp::new("clone-dest");
+        let dest = parent.path().join("board");
+        let url = src.path().to_string_lossy().to_string();
+        assert!(matches!(clone_into(&url, &dest), SyncOutcome::Done(_)));
+        assert!(dest.join("ideas/one.md").is_file(), "the pin came with it");
+        assert!(Sync::new(&dest).is_repo());
+        assert_eq!(Sync::new(&dest).commit_count(), 1);
+    }
+
+    #[test]
+    fn clone_into_stops_rather_than_panicking_on_a_bad_url() {
+        let parent = Temp::new("clone-bad");
+        let dest = parent.path().join("board");
+        let outcome = clone_into("/definitely/not/a/repo/anywhere", &dest);
+        assert!(outcome.is_stopped(), "got {outcome:?}");
+        assert!(!dest.exists(), "a failed clone leaves nothing behind");
     }
 
     #[test]

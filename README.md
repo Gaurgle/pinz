@@ -5,11 +5,21 @@ fixed-size post-it notes on a big, pannable, zoomable board - like a real cork
 board, but in a TUI. Notes are movable, stackable, editable, and grouped into
 switchable "worlds".
 
-> Status: **usable.** A pannable, zoomable board of post-it notes with a
-> four-level detail ladder, switchable worlds, and mouse move/select. Notes edit
-> in place through one word-wrapped editor - the first line is the title, the
-> rest the body - with text selection, copy and paste. Pins persist to their own
-> git repo as you work and sync between machines with `pinz sync`.
+> Status: **beta.** Everything described here works and is used daily, but the
+> version is deliberately below 1.0: the pin file format may still change, and a
+> change to it would want your board re-synced rather than silently migrated.
+> Keep a remote, which the setup below sets up anyway, and you have a backup by
+> construction.
+
+A pannable, zoomable board of post-it notes with a four-level detail ladder,
+switchable worlds, and mouse move/select. Notes edit in place through one
+word-wrapped editor - the first line is the title, the rest the body - with text
+selection, copy and paste.
+
+**Your pins live in a second repo of your own**, not in this one: `~/pinz-board`
+by default, or wherever `$PINZ_HOME` points. It is an ordinary private git repo,
+so your notes are yours, they are backed up by pushing, and `pinz sync` keeps
+your machines level. Nothing you write ever lands in the pinz source tree.
 
 ## Why it is built this way
 
@@ -70,13 +80,19 @@ for x86-64 Linux, are attached to every [release][releases].
 
 ### 2. Get your pins
 
-Now answer one question, because the two answers do **not** run the same
-commands:
+One question decides which command you run:
 
-> **Does a pin repo already exist - did any other machine ever run `pinz`?**
+> **Do your pins already exist - has any other machine ever run `pinz`?**
 
-**No. This is the first machine, and the pins do not exist yet.** Let pinz
-create the board, then give it a home:
+**Yes.** Bring them down before anything else:
+
+```sh
+pinz clone git@github.com:<you>/pinz-board.git
+pinz status                                          # should say: in sync
+```
+
+**No, this is the first machine.** Let pinz build the board, then give it a
+home:
 
 ```sh
 pinz sync                                            # creates ~/pinz-board + first commit
@@ -84,40 +100,43 @@ cd ~/pinz-board
 gh repo create pinz-board --private --source=. --push
 ```
 
-Order matters: `~/pinz-board` does not exist until `pinz sync` makes it, so running
-`gh repo create --source=.` first leaves you in the wrong directory, and if that
-one already has an `origin` you get `Unable to add remote "origin"`.
-
-**Yes. The pins are already on GitHub.** Clone them, and do not run `pinz sync`
-first:
+Without `gh`, or somewhere other than GitHub: make an empty private repo on any
+host and point the board at it.
 
 ```sh
-git clone git@github.com:<you>/pinz-board.git ~/pinz-board
-pinz status                                          # should say: in sync
+cd ~/pinz-board && git remote add origin <url> && git push -u origin main
 ```
 
-⚠️ **Do not mix the two.** Running the first-machine block on a machine whose
-pins already exist is the one way to get properly stuck: `pinz sync` sees no
-board, builds a fresh one with a single blank pin, and commits it. That repo now
-has a history unrelated to your real one, so `git remote add origin` cannot
-rescue it - git refuses to merge unrelated histories, and the board opens empty
-while your pins sit untouched on GitHub. The way out is to throw the new board
-away and clone properly:
+Order matters in the first-machine case: `~/pinz-board` does not exist until
+`pinz sync` makes it, so running `gh repo create --source=.` first leaves you in
+the wrong directory.
 
-```sh
-mv ~/pinz-board ~/pinz-board.bak                     # nothing of yours is in here
-git clone git@github.com:<you>/pinz-board.git ~/pinz-board
-pinz status
+#### If you run the wrong one
+
+Running the first-machine commands on a machine whose pins are really elsewhere
+used to be the one way to get properly stuck: `pinz sync` builds a fresh board,
+commits it, and that history is unrelated to your real one, so `git remote add
+origin` cannot rescue it - git refuses to merge unrelated histories.
+
+`pinz clone` handles it. Point it at your real repo and it will tell you what is
+in the way before touching anything:
+
+```
+✗ ~/pinz-board already exists, holding 1 pin across 1 board
+  cloning would move it to ~/pinz-board.bak-1788439053
+  re-run with --replace if that is what you want
 ```
 
-`pinz status` names this state whenever the board has no remote, and prints both
-routes rather than guessing which one you are in.
+On a terminal it asks instead of refusing, and answers anything but `y` with
+"left alone". A board that already has a remote is never moved: that one is
+working, and `pinz sync` is the command it wants. If the clone itself fails, the
+old board is put back where it was.
 
-That is the whole setup. `pinz` deliberately does not rely on `dotsync` or any
-other machine-setup tool; it syncs itself.
+`pinz` deliberately does not rely on `dotsync` or any other machine-setup tool;
+it syncs itself.
 
-To upgrade later, pull this repo and re-run `cargo install --path
-crates/pinz-tui`.
+To upgrade later: `brew upgrade pinz`, `cargo install pinz`, or from a checkout,
+pull and re-run `cargo install --path crates/pinz-tui`.
 
 ## Run it
 
@@ -145,6 +164,7 @@ that state calls for:
 | `pinz status` (`st`) | reports what is waiting and changes nothing |
 | `pinz pull` | only brings the other machine's pins in |
 | `pinz push` | only commits and sends this machine's pins |
+| `pinz clone <url>` | brings an existing pin repo onto this machine, first thing on a new one |
 | `pinz version` | prints this build and the newest release, and whether they match |
 | `pinz help` | the above, from the tool itself |
 

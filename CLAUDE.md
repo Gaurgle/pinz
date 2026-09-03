@@ -116,6 +116,11 @@ configured` without a TTY. Assertions about rendering go through Ratatui's
 - **A note's world size is fixed** (`NOTE_W`, `NOTE_H`). Zoom changes how big a
   note looks, never how big it is. Layout, hit-testing and stacking all assume
   uniform notes.
+- **A board is never silently replaced.** `pinz clone` moves an existing board
+  aside under a stamped name and puts it back if the clone fails; it refuses
+  outright when the board already has a remote. Git state cannot tell a blank
+  new board from a week of unsynced notes - both are "no commits, dirty tree" -
+  so the command reports what is there and asks rather than guessing.
 - **No two pins on a board share a spot.** Every placement - a new pin, a
   dropped pin, a pin arriving from another world - goes through
   `Board::free_spot`, which cascades down-right past anything within
