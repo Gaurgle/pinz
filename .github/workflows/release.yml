@@ -50,9 +50,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Cross-compiled on Apple silicon rather than built on a macos-13
+          # runner. The macOS SDK is universal and clang takes -arch x86_64, so
+          # this needs no extra setup - and the Intel image is being retired,
+          # its runners already queue for far longer than the build takes. The
+          # binary is built and never executed here, which was equally true on
+          # a native Intel runner: the job only ever built it.
+          - os: macos-latest
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
