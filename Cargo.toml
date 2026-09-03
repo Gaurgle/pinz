@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/pinz-core", "crates/pinz-tui"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 # Set by the locked ratatui (0.30.2 declares 1.88.0). pinz-core itself has no
 # dependencies and builds on far less, but the workspace is what people build.
@@ -27,4 +27,4 @@ ratatui = "0.30"
 # of three scattered ones. Cargo enforces the match: a path dependency whose
 # version requirement misses the crate beside it fails to resolve, so drift
 # breaks the build rather than the publish.
-pinz-core = { path = "crates/pinz-core", version = "0.5.1" }
+pinz-core = { path = "crates/pinz-core", version = "0.6.0" }
