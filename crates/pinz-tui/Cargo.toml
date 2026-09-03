@@ -1,20 +1,31 @@
 [package]
-name = "pinz-tui"
-description = "Terminal renderer for pinz (Ratatui)."
+# Published as `pinz` so the install command matches the tool's name, the way
+# ripgrep ships the `rg` binary from a `ripgrep` package. The directory keeps
+# the `-tui` suffix: it is one renderer of several the core is built for.
+name = "pinz"
+description = "A spatial bulletin board in the terminal: post-it notes on a pannable, zoomable board."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "pinz"
 path = "src/main.rs"
 
 [dependencies]
-pinz-core = { path = "../pinz-core" }
+# crates.io needs a version alongside the path: the path is used in this
+# workspace, the version is what a published `pinz` depends on.
+pinz-core = { path = "../pinz-core", version = "0.5.1" }
 ratatui = { workspace = true }
 
 [dev-dependencies]
 # The demo boards are a test-only fixture; enabling the feature here keeps it
 # out of the shipped `pinz` binary.
-pinz-core = { path = "../pinz-core", features = ["fixtures"] }
+pinz-core = { path = "../pinz-core", version = "0.5.1", features = ["fixtures"] }

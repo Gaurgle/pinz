@@ -5,8 +5,15 @@ members = ["crates/pinz-core", "crates/pinz-tui"]
 [workspace.package]
 version = "0.5.1"
 edition = "2021"
+# Set by the locked ratatui (0.30.2 declares 1.88.0). pinz-core itself has no
+# dependencies and builds on far less, but the workspace is what people build.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Gaurgle/pinz"
+homepage = "https://github.com/Gaurgle/pinz"
+authors = ["Andreas Roos"]
+keywords = ["tui", "ratatui", "notes", "kanban", "terminal"]
+categories = ["command-line-utilities", "text-editors"]
 
 # Shared dependency versions live here so every crate pins the same line.
 # pinz-core stays std-only; renderer deps live here so each renderer pins the
