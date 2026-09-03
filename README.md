@@ -5,6 +5,8 @@ fixed-size post-it notes on a big, pannable, zoomable board - like a real cork
 board, but in a TUI. Notes are movable, stackable, editable, and grouped into
 switchable "worlds".
 
+![A pinz board at preview zoom: overlapping coloured post-it notes on a dark canvas, with world tabs across the top](design/screenshots/preview-zoom.png)
+
 > Status: **beta.** Everything described here works and is used daily, but the
 > version is deliberately below 1.0: the pin file format may still change, and a
 > change to it would want your board re-synced rather than silently migrated.
@@ -20,6 +22,20 @@ selection, copy and paste.
 by default, or wherever `$PINZ_HOME` points. It is an ordinary private git repo,
 so your notes are yours, they are backed up by pushing, and `pinz sync` keeps
 your machines level. Nothing you write ever lands in the pinz source tree.
+
+## The zoom ladder
+
+Four levels of detail, not a slider. A terminal is a grid of cells, so pinz
+snaps to four rungs and each one draws a note differently.
+
+| Zoomed out | Zoomed in |
+|---|---|
+| ![Colour blocks with no text](design/screenshots/cluster-zoom.png) | ![Full readable notes](design/screenshots/document-zoom.png) |
+| **cluster** - solid blocks, no text. Find the pile by colour and position | **document** - the whole note, editable in place. The pin on the left is longer than itself and shows a scroll thumb |
+
+Between them sit **titles** and **preview**. `?` lists every key:
+
+![The key list overlaid on a board, in the Nord theme](design/screenshots/keys-overlay.png)
 
 ## Why it is built this way
 
