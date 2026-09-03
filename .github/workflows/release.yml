@@ -1,0 +1,104 @@
+# Builds the binaries a release ships, and the Homebrew formula pointing at
+# them. Triggered by pushing a `v*` tag, or run by hand against an existing tag
+# to backfill assets on a release that went out before this workflow existed.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build assets for (e.g. v0.5.1)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  # One name for the tag whether we were pushed to or dispatched.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  # The uploads below attach to a release, so one has to exist before the
+  # matrix fans out. Done in its own job rather than in each build: three
+  # parallel jobs racing to create the same release is how you get two.
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: ensure a release exists for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; attaching to it"
+          else
+            echo "creating $TAG as a draft; write the notes and publish it"
+            gh release create "$TAG" --draft --title "pinz $TAG" \
+              --notes "Draft opened by the release workflow. Replace with the real notes before publishing."
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - run: rustup update stable && rustup default stable
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} --bin pinz
+
+      # One tarball per target, carrying the licences the binary is offered
+      # under. The names are what the Homebrew formula expects.
+      - name: package
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          stage="pinz-${version}-${{ matrix.target }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/pinz" "$stage/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
+          shasum -a 256 "${stage}.tar.gz" | tee "${stage}.tar.gz.sha256"
+
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" pinz-*.tar.gz pinz-*.tar.gz.sha256 --clobber
+
+  # Renders the formula from the checksums of the tarballs just uploaded and
+  # attaches it too. Copying that one file into the tap is the whole update, so
+  # no cross-repository token is needed here.
+  formula:
+    name: homebrew formula
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: render and attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --pattern '*.sha256' --dir sums
+          ./packaging/homebrew/render-formula.sh "${TAG#v}" sums > pinz.rb
+          cat pinz.rb
+          gh release upload "$TAG" pinz.rb --clobber

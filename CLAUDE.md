@@ -42,7 +42,7 @@ worlds, mouse move and select, in-place editing through one word-wrapped editor,
 text selection with copy and paste, a moving window over a note whose text
 outgrew it, and git sync at the edges.
 
-There is no CI yet, and no `epoz` renderer yet - `pinz-core` has exactly one
+There is no `epoz` renderer yet - `pinz-core` has exactly one
 consumer today, but its API is designed as though it had two.
 
 ## Where things are written down
@@ -53,6 +53,7 @@ consumer today, but its API is designed as though it had two.
 | `design/specs/` | One dated file per feature, written and approved before the feature was built |
 | `design/pinz-demo.html` | Interactive look-and-feel prototype; open in a browser to compare against the intended look |
 | `TODO.md` | The running backlog of what is next |
+| `RELEASING.md` | The steps a release takes, in order, and why that order |
 | `README.md` | Install, run, keys, sync commands |
 
 `design/DESIGN.md` holds standing decisions; a file in `design/specs/` describes
@@ -71,11 +72,24 @@ covers.
   file in the repo, including ones you did not touch. Do not run it. Match the
   surrounding style instead.
 
+## Shipping conventions
+
+- **The package in `crates/pinz-tui` is published as `pinz`.** The directory
+  keeps the renderer suffix because the core is built for several renderers;
+  the package takes the plain name so `cargo install pinz` matches the binary.
+  Use `-p pinz` with cargo, not `-p pinz-tui`.
+- **CI runs tests on Linux and macOS, clippy with `-D warnings`, and a build on
+  the declared `rust-version`.** No `cargo fmt` check: formatting here is
+  hand-maintained. Raising `rust-version` means editing the msrv job too.
+- **Releases go out from a tag.** `RELEASING.md` has the order, which matters:
+  `pinz-core` reaches crates.io before `pinz`, because the binary crate depends
+  on a published version of the core.
+
 ## Build
 
 ```
 cargo test --workspace          # the whole suite
-cargo test -p pinz-tui editor:: # one module
+cargo test -p pinz editor::   # one module (the package in crates/pinz-tui)
 cargo clippy --workspace --all-targets
 cargo run --bin pinz            # the app, against your real ~/pinz-board
 PINZ_HOME=/tmp/scratch cargo run --bin pinz   # against a throwaway board

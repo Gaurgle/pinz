@@ -877,16 +877,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pinz-core"
-version = "0.5.1"
-
-[[package]]
-name = "pinz-tui"
+name = "pinz"
 version = "0.5.1"
 dependencies = [
  "pinz-core",
  "ratatui",
 ]
+
+[[package]]
+name = "pinz-core"
+version = "0.5.1"
 
 [[package]]
 name = "portable-atomic"

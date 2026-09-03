@@ -1,0 +1,52 @@
+# Tests and lints on every push to main and every pull request.
+#
+# No `cargo fmt` check: formatting in this repo is hand-maintained, and
+# `cargo fmt` reformats every file including ones the change never touched.
+# See CLAUDE.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-flight run when the same branch is pushed again.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup update stable && rustup default stable
+      - run: cargo --version && rustc --version
+      # --locked: build the dependency versions Cargo.lock names, so CI fails
+      # on a stale lockfile rather than silently resolving something newer.
+      - run: cargo test --workspace --locked
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup update stable && rustup default stable && rustup component add clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  msrv:
+    name: builds on the declared rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Kept in step with `rust-version` in the workspace manifest. If this job
+      # fails, either the code moved past the floor or the floor needs raising.
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: cargo +1.88.0 check --workspace --all-targets --locked
