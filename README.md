@@ -203,10 +203,19 @@ carries the deletion as a commit like any other change.
 cross it, a 📌 rides the cursor, and the footer names both the pin and where it
 is headed, so a mis-aimed drop is caught before you release.
 
-The pin keeps its position and lands on top of whatever is already on the target
-board. You stay on the board you were clearing, which is what you want when
-taking several pins off it in a row. Dropping on the board's own tab, on the `+`,
-or anywhere else does nothing.
+The pin lands in the middle of the target board, on top of whatever is already
+there, and cascades down-right if the middle is taken. Worlds do not share a
+coordinate space, so carrying the old position across would drop the pin
+somewhere off in the dark, far from the cloud that board frames. You stay on the
+board you were clearing, which is what you want when taking several pins off it
+in a row. Dropping on the board's own tab, on the `+`, or anywhere else does
+nothing.
+
+### Pins never hide each other
+
+No two pins on a board can end up in the same spot. A new pin, a dropped pin and
+a pin arriving from another world all cascade down-right until they are clear,
+so a pin can overlap its neighbours but can never vanish behind one.
 
 ### Undo
 

@@ -102,6 +102,12 @@ configured` without a TTY. Assertions about rendering go through Ratatui's
 - **A note's world size is fixed** (`NOTE_W`, `NOTE_H`). Zoom changes how big a
   note looks, never how big it is. Layout, hit-testing and stacking all assume
   uniform notes.
+- **No two pins on a board share a spot.** Every placement - a new pin, a
+  dropped pin, a pin arriving from another world - goes through
+  `Board::free_spot`, which cascades down-right past anything within
+  `CASCADE_X`/`CASCADE_Y`. The threshold is a *gap*, not equality: pin files
+  store x and y rounded to whole units, so a near miss becomes an exact overlap
+  on the next reload and buries the pin underneath.
 - **Every spatial operation goes through `View`** - pan, zoom, drag, hit-test.
   It is the single projection between world and screen, so what you click is
   what the math says is under the cursor.
