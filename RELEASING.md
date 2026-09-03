@@ -17,13 +17,21 @@ you start.
 
 ## 2. Bump the version
 
-One line in the workspace manifest, since both crates inherit it:
+Two adjacent lines in the workspace manifest, since both crates inherit them:
 
 ```sh
-$EDITOR Cargo.toml        # [workspace.package] version = "X.Y.Z"
+$EDITOR Cargo.toml        # [workspace.package] version, and the pinz-core
+                          # version in [workspace.dependencies] - same number
 cargo test --workspace    # refreshes Cargo.lock with the new version
 git commit -am "chore: release vX.Y.Z"
 git push
+```
+
+Miss the second and cargo says so straight away, because a path dependency's
+version requirement is checked against the crate it points at:
+
+```
+error: failed to select a version for the requirement `pinz-core = "^X.Y.Z"`
 ```
 
 Bump the minor for a feature, the patch for a fix. The version in the tag, the
