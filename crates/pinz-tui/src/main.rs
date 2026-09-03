@@ -18,7 +18,8 @@ mod ui;
 mod view;
 mod wrap;
 
-use std::io::{self, IsTerminal, Stdout};
+use std::fs;
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use app::App;
 use pinz_core::{
-    latest_release,
+    clone_into, latest_release,
     lock::{BoardLock, Ownership},
     Board, Color, FileStore, Note, Standing, Store, StoreError, Sync, SyncOutcome, Version,
 };
@@ -86,6 +87,7 @@ fn main() -> io::Result<()> {
         Command::Status => git_command(Command::Status),
         Command::Pull => git_command(Command::Pull),
         Command::Push => git_command(Command::Push),
+        Command::Clone { ref url } => clone_command(url.as_deref(), opts.replace),
         Command::Run => run_app(opts),
     };
     close_block();
@@ -110,6 +112,12 @@ enum Command {
     /// Print the version. Worth having with two machines: the pin format is
     /// shared, so knowing both ends run the same build matters.
     Version,
+    /// Bring an existing pin repo down onto this machine.
+    ///
+    /// The url is optional here so that `pinz clone` with nothing after it
+    /// reaches the command and can answer with a sentence, rather than being
+    /// read as a theme called "clone".
+    Clone { url: Option<String> },
 }
 
 impl Command {
@@ -132,6 +140,7 @@ impl Command {
             "push" => Command::Push,
             "help" | "--help" | "-h" => Command::Help,
             "version" | "--version" | "-V" => Command::Version,
+            "clone" => Command::Clone { url: None },
             _ => return None,
         })
     }
@@ -144,6 +153,9 @@ struct Options {
     theme: Option<String>,
     /// Whether to touch git at all this run.
     sync: bool,
+    /// `clone` only: move an existing board aside without asking. What the
+    /// prompt would have asked, for a script or a session with no terminal.
+    replace: bool,
 }
 
 impl Options {
@@ -152,16 +164,28 @@ impl Options {
             command: Command::Run,
             theme: None,
             sync: true,
+            replace: false,
         };
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--no-sync" => opts.sync = false,
+                "--replace" => opts.replace = true,
                 "--theme" | "-t" => opts.theme = args.next(),
                 // A subcommand, if it names one; otherwise a bare word is the
                 // theme: `pinz nord`.
                 s => match Command::from_word(s) {
                     Some(command) => opts.command = command,
+                    // The first bare word after `clone` is what to clone.
+                    // Taken here rather than with `args.next()` at the
+                    // subcommand, so the flag may sit on either side of it.
+                    None if !s.starts_with('-')
+                        && opts.command == (Command::Clone { url: None }) =>
+                    {
+                        opts.command = Command::Clone {
+                            url: Some(s.to_string()),
+                        }
+                    }
                     None if !s.starts_with('-') && opts.theme.is_none() => {
                         opts.theme = Some(s.to_string())
                     }
@@ -183,12 +207,14 @@ USAGE:
     pinz status  (st)   report what is waiting, and change nothing
     pinz pull           only bring the other machine's pins in
     pinz push           only commit and send this machine's pins
+    pinz clone <url>    bring an existing pin repo onto this machine
     pinz help           show this
     pinz version        print this build, and the newest release
 
 OPTIONS:
     -t, --theme <NAME>  start in a theme (mocha, tokyo, gruvbox, nord, light)
         --no-sync       do not touch git this run
+        --replace       clone: move an existing board aside without asking
 
 PINS:
     Pins live in $PINZ_HOME, or ~/pinz-board. One directory per board, one markdown
@@ -249,6 +275,121 @@ fn version_report(running: &str, latest: Option<Version>, repository: &str) -> S
 fn pin_root() -> io::Result<PathBuf> {
     FileStore::default_root()
         .ok_or_else(|| io::Error::other("cannot find a home directory; set PINZ_HOME"))
+}
+
+// ---- the clone subcommand ----
+
+/// Bring an existing pin repo onto this machine.
+///
+/// This exists because the alternative is a trap. `pinz` builds a board the
+/// first time it runs, and a board built here can never be joined to one that
+/// already exists elsewhere: the histories are unrelated and git refuses to
+/// merge them. Cloning before anything else is the only order that works, so it
+/// gets a command of its own rather than a paragraph of instructions to follow
+/// carefully.
+fn clone_command(url: Option<&str>, replace: bool) -> io::Result<()> {
+    let Some(url) = url else {
+        report_problem("pinz clone needs a url:  pinz clone <url>");
+        return Ok(());
+    };
+    let root = pin_root()?;
+
+    // The ordinary case: nothing here yet, so there is nothing to weigh up.
+    if !root.exists() {
+        report("clone", clone_into(url, &root));
+        return Ok(());
+    }
+
+    let sync = Sync::new(&root);
+    if let Some(remote) = sync.remote_url() {
+        report_problem(&format!(
+            "{} already syncs with {remote}\n  nothing to clone: `pinz sync` is the command you want",
+            root.display()
+        ));
+        return Ok(());
+    }
+
+    // A board with no remote. It may be the blank one pinz made a moment ago,
+    // or a week of notes that were never pushed anywhere, and from here those
+    // are indistinguishable - so say what is actually in it and let the person
+    // who knows decide.
+    let summary = board_summary(&root);
+    let backup = backup_path(&root, now_secs());
+    if !replace {
+        if !std::io::stdin().is_terminal() {
+            report_problem(&format!(
+                "{} already exists, holding {summary}\n  cloning would move it to {}\n  re-run with --replace if that is what you want",
+                root.display(),
+                backup.display()
+            ));
+            return Ok(());
+        }
+        println!("  {} already exists, holding {summary}", root.display());
+        println!("  cloning moves it to {}", backup.display());
+        if !ask("  move it aside and clone?")? {
+            report_problem("left alone; nothing was moved or cloned");
+            return Ok(());
+        }
+    }
+
+    fs::rename(&root, &backup)?;
+    let outcome = clone_into(url, &root);
+    if outcome.is_stopped() {
+        // Put it back rather than leaving someone with neither board.
+        fs::rename(&backup, &root)?;
+        report("clone", outcome);
+        return Ok(());
+    }
+    report("moved", SyncOutcome::Done(format!("old board to {}", backup.display())));
+    report("clone", outcome);
+    Ok(())
+}
+
+/// What a board holds, for a person deciding whether to move it aside.
+fn board_summary(root: &Path) -> String {
+    let boards = FileStore::open(root)
+        .and_then(|mut store| store.load())
+        .unwrap_or_default();
+    let pins: usize = boards.iter().map(|b| b.notes.len()).sum();
+    format!(
+        "{pins} pin{} across {} board{}",
+        if pins == 1 { "" } else { "s" },
+        boards.len(),
+        if boards.len() == 1 { "" } else { "s" }
+    )
+}
+
+/// Where a board is moved before a clone takes its place: beside it, under the
+/// same name with a stamp appended.
+///
+/// Built from the file name rather than with `with_extension`, which would eat
+/// everything after a dot and turn `pins.v2` into `pins.bak-...`.
+fn backup_path(root: &Path, stamp: u64) -> PathBuf {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "pinz-board".to_string());
+    root.with_file_name(format!("{name}.bak-{stamp}"))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A yes/no question on the terminal. Anything but an explicit yes is a no:
+/// the answer that changes nothing is the one a stray newline should give.
+fn ask(question: &str) -> io::Result<bool> {
+    print!("{question} [y/N] ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 // ---- the sync subcommand ----
@@ -342,10 +483,14 @@ fn remote_advice(root: &Path, created: bool) -> String {
     lines.push("  your pins already live in a repo, pushed from another machine?".into());
     lines.push("  clone it. do not add a remote here - the histories are unrelated".into());
     lines.push("  and git will refuse to merge them:".into());
-    lines.push(format!("      mv {root} {root}.bak && git clone <url> {root}"));
+    lines.push("      pinz clone <url>".into());
     lines.push("  this is your first machine? create the remote:".into());
     lines.push(format!(
         "      cd {root} && gh repo create pinz-board --private --source=. --push"
+    ));
+    lines.push("  no gh, or not GitHub? make an empty repo on any host, then:".into());
+    lines.push(format!(
+        "      cd {root} && git remote add origin <url> && git push -u origin main"
     ));
     lines.join("\n")
 }
@@ -1025,6 +1170,74 @@ mod tests {
     }
 
     #[test]
+    fn clone_takes_the_url_that_follows_it() {
+        let o = parse(&["clone", "git@github.com:you/pinz-board.git"]);
+        assert_eq!(
+            o.command,
+            Command::Clone {
+                url: Some("git@github.com:you/pinz-board.git".into())
+            }
+        );
+        assert_eq!(o.theme, None, "the url must not be read as a theme");
+    }
+
+    #[test]
+    fn clone_accepts_replace_on_either_side_of_the_url() {
+        for args in [
+            vec!["clone", "--replace", "url"],
+            vec!["clone", "url", "--replace"],
+        ] {
+            let o = parse(&args);
+            assert_eq!(
+                o.command,
+                Command::Clone {
+                    url: Some("url".into())
+                },
+                "{args:?}"
+            );
+            assert!(o.replace, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn clone_without_a_url_still_parses_so_the_error_can_be_a_sentence() {
+        let o = parse(&["clone"]);
+        assert_eq!(o.command, Command::Clone { url: None });
+        assert!(!o.replace);
+    }
+
+    #[test]
+    fn a_board_is_moved_aside_next_to_itself_with_the_stamp_appended() {
+        let at = backup_path(Path::new("/home/me/pinz-board"), 1788427091);
+        assert_eq!(at, Path::new("/home/me/pinz-board.bak-1788427091"));
+    }
+
+    /// `with_extension` would eat everything after a dot in the directory name,
+    /// so a board at `~/pins.v2` must not back up to `~/pins.bak-...`.
+    #[test]
+    fn a_dot_in_the_board_name_survives_the_backup() {
+        let at = backup_path(Path::new("/home/me/pins.v2"), 7);
+        assert_eq!(at, Path::new("/home/me/pins.v2.bak-7"));
+    }
+
+    #[test]
+    fn the_no_remote_advice_offers_clone_and_a_remote_without_gh() {
+        let text = remote_advice(Path::new("/tmp/board"), true);
+        assert!(
+            text.contains("pinz clone <url>"),
+            "should point at the subcommand rather than a mv incantation:\n{text}"
+        );
+        assert!(
+            text.contains("git remote add origin"),
+            "should work for someone without gh:\n{text}"
+        );
+        assert!(
+            text.contains("gh repo create"),
+            "and still show the short way for someone with it:\n{text}"
+        );
+    }
+
+    #[test]
     fn only_the_read_only_command_may_be_abbreviated() {
         // A short alias is allowed only where misreading it costs nothing. "s"
         // and "up" are the dangerous ones: both could be taken for a command
@@ -1065,7 +1278,7 @@ mod tests {
         // refuses that merge. Whoever reads only the first suggestion must read
         // the one that is safe either way.
         let advice = remote_advice(Path::new("/home/x/pinz-board"), false);
-        let clone = advice.find("git clone").expect("cloning must be offered");
+        let clone = advice.find("pinz clone").expect("cloning must be offered");
         let create = advice
             .find("gh repo create")
             .expect("creating a remote must be offered");
