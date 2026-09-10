@@ -1136,7 +1136,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_clean_save_says_nothing() {
         assert_eq!(skipped_message(&[], Path::new("/board")), None);
     }
