@@ -34,6 +34,26 @@ impl std::error::Error for StoreError {}
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// What a save did, beyond succeeding.
+///
+/// A save can succeed and still have left a pin alone, so `Result<()>` is not
+/// enough to describe one. Only the store can detect that a file changed
+/// underneath the session, and only the caller can tell the user, so the fact
+/// has to cross the seam.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SaveReport {
+    /// Pins left alone because they changed on disk since this store last read
+    /// or wrote them. Overwriting these would destroy the other writer's edit.
+    pub skipped: Vec<std::path::PathBuf>,
+}
+
+impl SaveReport {
+    /// Nothing was skipped, so there is nothing to warn about.
+    pub fn is_clean(&self) -> bool {
+        self.skipped.is_empty()
+    }
+}
+
 /// Load and persist the full set of boards.
 ///
 /// Deliberately coarse for now - whole-workspace load/save. We widen it
@@ -41,7 +61,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// trait does not grow speculative methods no caller uses yet.
 pub trait Store {
     fn load(&mut self) -> Result<Vec<Board>>;
-    fn save(&mut self, boards: &[Board]) -> Result<()>;
+    fn save(&mut self, boards: &[Board]) -> Result<SaveReport>;
 
     /// Remove a board and everything on it.
     ///
@@ -81,9 +101,10 @@ impl Store for MemoryStore {
         Ok(self.boards.clone())
     }
 
-    fn save(&mut self, boards: &[Board]) -> Result<()> {
+    fn save(&mut self, boards: &[Board]) -> Result<SaveReport> {
         self.boards = boards.to_vec();
-        Ok(())
+        // Nothing to diverge from: memory has one writer by construction.
+        Ok(SaveReport::default())
     }
 
     fn delete_board(&mut self, name: &str) -> Result<()> {
