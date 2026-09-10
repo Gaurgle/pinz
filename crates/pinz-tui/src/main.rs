@@ -29,6 +29,7 @@ use app::App;
 use pinz_core::{
     clone_into, latest_release,
     lock::{BoardLock, Ownership},
+    store::SaveReport,
     Board, Color, FileStore, Note, Standing, Store, StoreError, Sync, SyncOutcome, Version,
 };
 use ratatui::backend::CrosstermBackend;
@@ -819,7 +820,7 @@ fn run_app(opts: Options) -> io::Result<()> {
     }
 
     let mut terminal = setup()?;
-    let result = run(&mut terminal, &mut app, &mut store);
+    let result = run(&mut terminal, &mut app, &mut store, &root);
     restore()?;
 
     let save_error = result?;
@@ -829,9 +830,18 @@ fn run_app(opts: Options) -> io::Result<()> {
 
     // A last save catches anything the loop deferred (a quit mid-drag).
     if !app.read_only() {
-        if let Err(e) = persist(&mut app, &mut store) {
-            report_problem(&format!("could not write pins: {e}"));
-            return Ok(());
+        match persist(&mut app, &mut store) {
+            Err(e) => {
+                report_problem(&format!("could not write pins: {e}"));
+                return Ok(());
+            }
+            // The footer is gone by now, so a warning here has to reach stderr
+            // or it is never seen at all.
+            Ok(report) => {
+                if let Some(message) = skipped_message(&report.skipped, &root) {
+                    report_problem(&message);
+                }
+            }
         }
     }
     // Report what git did, in the same shape the subcommands use. The push on
@@ -906,7 +916,12 @@ const FRAME: Duration = Duration::from_millis(16);
 ///
 /// Returns a save error, if one happened, for the caller to print once the
 /// terminal is back - nothing may be written to the screen while the TUI owns it.
-fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<Option<String>> {
+fn run(
+    terminal: &mut Tui,
+    app: &mut App,
+    store: &mut dyn Store,
+    root: &Path,
+) -> io::Result<Option<String>> {
     let mut saved = app.revision();
     let mut last = Instant::now();
     loop {
@@ -934,8 +949,15 @@ fn run(terminal: &mut Tui, app: &mut App, store: &mut dyn Store) -> io::Result<O
         // never writes at all - the app reverts its changes, and this makes
         // sure not even the revert reaches the disk.
         if !app.read_only() && app.revision() != saved && !app.is_dragging() {
-            if let Err(e) = persist(app, store) {
-                return Ok(Some(e.to_string()));
+            match persist(app, store) {
+                Err(e) => return Ok(Some(e.to_string())),
+                Ok(report) => {
+                    // Sticky, like a sync conflict: a one-off status would be
+                    // wiped by the next keystroke, and this needs answering.
+                    if let Some(message) = skipped_message(&report.skipped, root) {
+                        app.set_warning(message);
+                    }
+                }
             }
             saved = app.revision();
         }
@@ -972,13 +994,40 @@ fn deliver_copy(out: &mut impl io::Write, app: &mut App) {
     }
 }
 
+/// How to say that a save left pins alone, or `None` when it did not.
+///
+/// Paths are shown relative to the pin root, because the absolute ones are
+/// long enough to push the rest of the sentence out of the footer. Past three,
+/// the count carries more than the names would.
+fn skipped_message(skipped: &[PathBuf], root: &Path) -> Option<String> {
+    let n = skipped.len();
+    if n == 0 {
+        return None;
+    }
+    let pin = if n == 1 { "pin" } else { "pins" };
+    let head = format!("{n} {pin} changed on disk and {} not overwritten", if n == 1 { "was" } else { "were" });
+    if n > 3 {
+        return Some(format!("{head}; reload to see them"));
+    }
+    let names: Vec<String> = skipped
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    Some(format!("{head}: {}", names.join(", ")))
+}
+
 /// Remove the worlds the app dropped, then write what is left.
 ///
 /// Deletes first: a save writes every board it is handed, so doing it the other
 /// way round would recreate a directory we are about to remove. A world that
 /// never reached the disk - made and deleted in one session - is not on it to
 /// remove, and that is not a reason to fail the save.
-fn persist(app: &mut App, store: &mut dyn Store) -> Result<(), StoreError> {
+fn persist(app: &mut App, store: &mut dyn Store) -> Result<SaveReport, StoreError> {
     for name in app.take_pending_deletes() {
         match store.delete_board(&name) {
             Ok(()) | Err(StoreError::NotFound(_)) => {}
@@ -1084,6 +1133,51 @@ mod tests {
 
         let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
         assert_eq!(names, ["ideas"]);
+    }
+
+    #[test]
+    #[test]
+    fn a_clean_save_says_nothing() {
+        assert_eq!(skipped_message(&[], Path::new("/board")), None);
+    }
+
+    #[test]
+    fn one_skipped_pin_is_named_relative_to_the_root() {
+        let msg = skipped_message(
+            &[PathBuf::from("/board/sync/small-machine.md")],
+            Path::new("/board"),
+        )
+        .unwrap();
+        assert!(msg.contains("1 pin changed on disk"), "{msg}");
+        assert!(msg.contains("was not overwritten"), "{msg}");
+        assert!(msg.contains("sync/small-machine.md"), "{msg}");
+        assert!(!msg.contains("/board/"), "the root is noise in a footer: {msg}");
+    }
+
+    #[test]
+    fn a_few_skipped_pins_are_listed_and_pluralised() {
+        let msg = skipped_message(
+            &[
+                PathBuf::from("/board/a/one.md"),
+                PathBuf::from("/board/a/two.md"),
+            ],
+            Path::new("/board"),
+        )
+        .unwrap();
+        assert!(msg.contains("2 pins changed on disk"), "{msg}");
+        assert!(msg.contains("were not overwritten"), "{msg}");
+        assert!(msg.contains("a/one.md, a/two.md"), "{msg}");
+    }
+
+    #[test]
+    fn more_than_three_skipped_pins_are_counted_not_listed() {
+        let paths: Vec<PathBuf> = (0..4)
+            .map(|i| PathBuf::from(format!("/board/a/{i}.md")))
+            .collect();
+        let msg = skipped_message(&paths, Path::new("/board")).unwrap();
+        assert!(msg.contains("4 pins changed on disk"), "{msg}");
+        assert!(msg.contains("reload"), "{msg}");
+        assert!(!msg.contains(".md"), "names would not fit in the footer: {msg}");
     }
 
     #[test]

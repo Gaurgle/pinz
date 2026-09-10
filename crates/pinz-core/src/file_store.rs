@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::{Board, Color, Note};
-use crate::store::{Result, Store, StoreError};
+use crate::store::{Result, SaveReport, Store, StoreError};
 
 /// Longest slug taken from a title when naming a file.
 const SLUG_MAX: usize = 40;
@@ -62,6 +62,13 @@ pub struct FileStore {
     /// Note id -> the file it was loaded from, so a save can rewrite, move, or
     /// delete exactly the files this store is responsible for and no others.
     paths: HashMap<u64, PathBuf>,
+    /// Path -> the bytes this store last read from or wrote to it.
+    ///
+    /// A pin file has two writers: pinz, and anything else with a text editor.
+    /// Comparing the file against what we would write cannot tell "stale, I
+    /// hold the new version" from "newer than the copy I loaded". Comparing it
+    /// against what we last saw there can.
+    seen: HashMap<PathBuf, String>,
     next_id: u64,
 }
 
@@ -73,6 +80,7 @@ impl FileStore {
         Ok(Self {
             root,
             paths: HashMap::new(),
+            seen: HashMap::new(),
             next_id: 1,
         })
     }
@@ -142,21 +150,45 @@ impl FileStore {
         candidate
     }
 
-    /// Write `contents` only if it differs from what is already there, so a save
-    /// that changed nothing leaves the working tree (and git) untouched.
-    fn write_if_changed(path: &Path, contents: &str) -> Result<()> {
+    /// Write `contents`, unless doing so would destroy someone else's edit.
+    ///
+    /// Three cases, in order:
+    ///
+    /// 1. The file already holds `contents`. Both writers agree, so there is
+    ///    nothing to write and nothing to warn about. This is also what keeps a
+    ///    save that changed nothing from churning the working tree and git.
+    /// 2. The file differs from `contents` *and* from what this store last read
+    ///    or wrote there. Something else changed it. Leave it alone.
+    /// 3. Otherwise the file is our own last write and `contents` is newer.
+    ///    Write it.
+    fn write_pin(&mut self, path: &Path, contents: &str) -> Result<PinWrite> {
         if let Ok(existing) = fs::read_to_string(path) {
             if existing == contents {
-                return Ok(());
+                self.seen.insert(path.to_path_buf(), existing);
+                return Ok(PinWrite::Done);
+            }
+            if self.seen.get(path).is_some_and(|known| *known != existing) {
+                return Ok(PinWrite::Skipped);
             }
         }
-        fs::write(path, contents).map_err(|e| backend("writing a pin", e))
+        fs::write(path, contents).map_err(|e| backend("writing a pin", e))?;
+        self.seen.insert(path.to_path_buf(), contents.to_string());
+        Ok(PinWrite::Done)
     }
+}
+
+/// What writing one pin did.
+enum PinWrite {
+    /// Written, or already byte-identical.
+    Done,
+    /// Left alone: the file changed on disk since this store last saw it.
+    Skipped,
 }
 
 impl Store for FileStore {
     fn load(&mut self) -> Result<Vec<Board>> {
         self.paths.clear();
+        self.seen.clear();
         self.next_id = 1;
 
         let mut boards = Vec::new();
@@ -171,6 +203,7 @@ impl Store for FileStore {
                 let id = self.next_id;
                 self.next_id += 1;
                 board.notes.push(parse_pin(&text, id));
+                self.seen.insert(path.clone(), text);
                 self.paths.insert(id, path);
             }
             boards.push(board);
@@ -178,8 +211,9 @@ impl Store for FileStore {
         Ok(boards)
     }
 
-    fn save(&mut self, boards: &[Board]) -> Result<()> {
+    fn save(&mut self, boards: &[Board]) -> Result<SaveReport> {
         let mut written: HashMap<u64, PathBuf> = HashMap::new();
+        let mut skipped: Vec<PathBuf> = Vec::new();
 
         for board in boards {
             let dir = self.root.join(&board.name);
@@ -192,12 +226,20 @@ impl Store for FileStore {
                     Some(old) if old.parent() == Some(dir.as_path()) => old.clone(),
                     Some(old) => {
                         let moved = dir.join(old.file_name().unwrap_or_default());
-                        let _ = fs::remove_file(old);
+                        let old = old.clone();
+                        let _ = fs::remove_file(&old);
+                        self.seen.remove(&old);
                         moved
                     }
                     None => self.new_path(&board.name, note),
                 };
-                Self::write_if_changed(&path, &render_pin(note))?;
+                if let PinWrite::Skipped = self.write_pin(&path, &render_pin(note))? {
+                    skipped.push(path.clone());
+                }
+                // Recorded whether written or skipped. The pruning pass below
+                // deletes every loaded path that is not in `written`, so
+                // leaving a skipped pin out would turn "do not overwrite this"
+                // into "delete it" - the worse of the two failures.
                 written.insert(note.id, path);
             }
 
@@ -218,11 +260,12 @@ impl Store for FileStore {
         for (id, path) in &self.paths {
             if !written.contains_key(id) {
                 let _ = fs::remove_file(path);
+                self.seen.remove(path);
             }
         }
 
         self.paths = written;
-        Ok(())
+        Ok(SaveReport { skipped })
     }
 
     /// Remove the board's directory, pins and all.
@@ -395,7 +438,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
-    fn note(id: u64, title: &str, body: &str) -> Note {
+    pub(super) fn note(id: u64, title: &str, body: &str) -> Note {
         Note {
             id,
             title: title.to_string(),
@@ -408,16 +451,16 @@ mod tests {
     }
 
     /// A scratch root that cleans itself up.
-    struct TempRoot(PathBuf);
+    pub(super) struct TempRoot(PathBuf);
 
     impl TempRoot {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("pinz-test-{tag}-{}", now_secs()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             TempRoot(dir)
         }
-        fn path(&self) -> &Path {
+        pub(super) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -725,5 +768,151 @@ mod tests {
         // The epoch itself, and a leap day.
         assert_eq!(timestamp_prefix(0), "1970-01-01-000000");
         assert_eq!(timestamp_prefix(1_709_164_800), "2024-02-29-000000");
+    }
+}
+
+#[cfg(test)]
+mod external_edit_tests {
+    use super::tests::*;
+    use super::*;
+
+    /// Load a board, then change one pin on disk behind the store's back.
+    /// Returns the store, the board, and the path that was tampered with.
+    fn store_with_an_external_edit(root: &Path, new_text: &str) -> (FileStore, Vec<Board>, PathBuf) {
+        let mut store = FileStore::open(root).unwrap();
+        store
+            .save(&[Board {
+                name: "ideas".to_string(),
+                notes: vec![note(1, "First", "one")],
+            }])
+            .unwrap();
+
+        let mut store = FileStore::open(root).unwrap();
+        let boards = store.load().unwrap();
+        let path = store.paths.values().next().unwrap().clone();
+        fs::write(&path, new_text).unwrap();
+        (store, boards, path)
+    }
+
+    #[test]
+    fn an_external_edit_is_not_overwritten_and_is_reported() {
+        let root = TempRoot::new("external-edit");
+        let theirs = "---\nx: 0\ny: 0\nz: 1\ncolor: teal\n---\n# Theirs\n\nedited elsewhere\n";
+        let (mut store, mut boards, path) = store_with_an_external_edit(root.path(), theirs);
+
+        // The session edits the same pin, so a save would want to write it.
+        boards[0].notes[0].body = "changed in pinz".to_string();
+        let report = store.save(&boards).unwrap();
+
+        assert_eq!(report.skipped, vec![path.clone()], "the pin must be reported");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            theirs,
+            "the other writer's bytes must survive"
+        );
+    }
+
+    /// The pruning pass deletes loaded paths that are not written. A skipped
+    /// pin must not fall into it: refusing to overwrite a file and then
+    /// deleting it would be the worse of the two failures.
+    #[test]
+    fn a_skipped_pin_is_not_deleted_by_the_prune_pass() {
+        let root = TempRoot::new("skip-not-delete");
+        let theirs = "---\nx: 0\ny: 0\nz: 1\ncolor: teal\n---\n# Theirs\n\nkeep me\n";
+        let (mut store, boards, path) = store_with_an_external_edit(root.path(), theirs);
+
+        store.save(&boards).unwrap();
+
+        assert!(path.exists(), "a skipped pin must still be on disk");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_pin_only_pinz_edited_still_writes() {
+        let root = TempRoot::new("no-false-positive");
+        let mut store = FileStore::open(root.path()).unwrap();
+        store
+            .save(&[Board {
+                name: "ideas".to_string(),
+                notes: vec![note(1, "First", "one")],
+            }])
+            .unwrap();
+        let mut store = FileStore::open(root.path()).unwrap();
+        let mut boards = store.load().unwrap();
+
+        boards[0].notes[0].body = "changed in pinz".to_string();
+        let report = store.save(&boards).unwrap();
+
+        assert!(report.is_clean(), "nothing else touched it, so nothing to skip");
+        let path = store.paths.values().next().unwrap();
+        assert!(fs::read_to_string(path).unwrap().contains("changed in pinz"));
+    }
+
+    /// Without updating the record after each write, a session's second save
+    /// would see its own first save as somebody else's edit.
+    #[test]
+    fn a_second_save_does_not_flag_the_first_saves_writes() {
+        let root = TempRoot::new("second-save");
+        let mut store = FileStore::open(root.path()).unwrap();
+        let mut boards = vec![Board {
+            name: "ideas".to_string(),
+            notes: vec![note(1, "First", "one")],
+        }];
+        store.save(&boards).unwrap();
+
+        boards[0].notes[0].body = "second".to_string();
+        assert!(store.save(&boards).unwrap().is_clean());
+        boards[0].notes[0].body = "third".to_string();
+        assert!(store.save(&boards).unwrap().is_clean());
+    }
+
+    /// Two writers that happen to agree are not in conflict.
+    #[test]
+    fn a_file_already_holding_what_we_would_write_is_not_flagged() {
+        let root = TempRoot::new("agree");
+        let mut store = FileStore::open(root.path()).unwrap();
+        let boards = vec![Board {
+            name: "ideas".to_string(),
+            notes: vec![note(1, "First", "one")],
+        }];
+        store.save(&boards).unwrap();
+
+        let mut store = FileStore::open(root.path()).unwrap();
+        let boards = store.load().unwrap();
+        let path = store.paths.values().next().unwrap().clone();
+        // Rewrite the file with byte-identical content, as a touch would.
+        let same = fs::read_to_string(&path).unwrap();
+        fs::write(&path, &same).unwrap();
+
+        assert!(store.save(&boards).unwrap().is_clean());
+    }
+
+    #[test]
+    fn a_new_pin_writes_normally() {
+        let root = TempRoot::new("new-pin");
+        let mut store = FileStore::open(root.path()).unwrap();
+
+        let report = store
+            .save(&[Board {
+                name: "ideas".to_string(),
+                notes: vec![note(1, "Fresh", "body")],
+            }])
+            .unwrap();
+
+        assert!(report.is_clean());
+        assert_eq!(store.paths.len(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_board_reports_nothing() {
+        let root = TempRoot::new("unchanged");
+        let mut store = FileStore::open(root.path()).unwrap();
+        let boards = vec![Board {
+            name: "ideas".to_string(),
+            notes: vec![note(1, "First", "one")],
+        }];
+        store.save(&boards).unwrap();
+
+        assert!(store.save(&boards).unwrap().is_clean());
     }
 }
