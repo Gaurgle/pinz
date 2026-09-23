@@ -1914,6 +1914,14 @@ impl App {
 
     // ---- world switching ----
 
+    /// Start on the world called `name`, the one open when the board was last
+    /// left. A name no board has any more leaves the first world open.
+    pub fn open_world(&mut self, name: &str) {
+        if let Some(index) = self.boards.iter().position(|b| b.name == name) {
+            self.switch_world(index);
+        }
+    }
+
     fn switch_world(&mut self, index: usize) {
         if self.boards.is_empty() {
             return;
@@ -2496,6 +2504,22 @@ mod tests {
         assert_eq!(a.active_index(), 0);
         a.on_key(key(KeyCode::Char('3')));
         assert_eq!(a.active_index(), 2);
+    }
+
+    #[test]
+    fn opens_on_a_named_world() {
+        let mut a = app();
+        let name = a.boards()[2].name.clone();
+        a.open_world(&name);
+        assert_eq!(a.active_index(), 2);
+    }
+
+    /// Deleted or renamed since it was recorded: the first world, as before.
+    #[test]
+    fn a_world_that_is_gone_opens_on_the_first() {
+        let mut a = app();
+        a.open_world("no such world");
+        assert_eq!(a.active_index(), 0);
     }
 
     #[test]

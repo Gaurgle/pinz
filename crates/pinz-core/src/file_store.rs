@@ -43,6 +43,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::model::{Board, Color, Note};
 use crate::store::{Result, SaveReport, Store, StoreError};
 
+/// The world that was open when the board was last left, in the pin root.
+///
+/// Hidden, so the loader never mistakes it for a board. Not gitignored, unlike
+/// `.pinz-lock`: it is meant to follow you to the other machine. See
+/// `design/specs/2026-09-23-remember-the-last-world.md`.
+pub const LAST_WORLD_FILE: &str = ".pinz-world";
+
 /// Longest slug taken from a title when naming a file.
 const SLUG_MAX: usize = 40;
 
@@ -288,6 +295,48 @@ impl Store for FileStore {
         }
         fs::remove_dir_all(&dir).map_err(|e| backend("deleting a board directory", e))
     }
+
+    /// An unreadable or garbled file is the same as none: the worst outcome is
+    /// opening on the first world, which is what pinz did before it remembered.
+    fn load_last_world(&mut self) -> Option<String> {
+        let text = fs::read_to_string(self.root.join(LAST_WORLD_FILE)).ok()?;
+        parse_last_world(&text).map(|(name, _)| name)
+    }
+
+    /// Leaves the file alone when it already names this world, so staying in
+    /// one world adds no commits, and `at` keeps saying when you arrived.
+    fn save_last_world(&mut self, name: &str) -> Result<()> {
+        let path = self.root.join(LAST_WORLD_FILE);
+        let current = fs::read_to_string(&path).ok();
+        if current.as_deref().and_then(parse_last_world).is_some_and(|(n, _)| n == name) {
+            return Ok(());
+        }
+        fs::write(&path, render_last_world(name, now_secs()))
+            .map_err(|e| backend("recording the open world", e))
+    }
+}
+
+// ---- the last-world file format ----
+
+/// `world:` then `at:`, when it became the recorded world in Unix seconds.
+/// `at` is what lets a sync conflict on this file pick the newer side.
+pub fn render_last_world(name: &str, at: u64) -> String {
+    format!("world: {name}\nat: {at}\n")
+}
+
+/// The world and its `at`, or `None` without a world. A missing `at` reads as
+/// 0, the oldest possible, so a hand-written file loses any tie-break.
+pub fn parse_last_world(text: &str) -> Option<(String, u64)> {
+    let mut name = None;
+    let mut at = 0;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("world:") {
+            name = Some(v.trim().to_string()).filter(|n| !n.is_empty());
+        } else if let Some(v) = line.strip_prefix("at:") {
+            at = v.trim().parse().unwrap_or(0);
+        }
+    }
+    name.map(|n| (n, at))
 }
 
 // ---- the pin file format ----
@@ -768,6 +817,59 @@ mod tests {
         // The epoch itself, and a leap day.
         assert_eq!(timestamp_prefix(0), "1970-01-01-000000");
         assert_eq!(timestamp_prefix(1_709_164_800), "2024-02-29-000000");
+    }
+
+    #[test]
+    fn the_last_world_round_trips_through_disk() {
+        let root = TempRoot::new("last-world");
+        let mut store = FileStore::open(root.path()).unwrap();
+        store.save_last_world("todo").unwrap();
+        let mut fresh = FileStore::open(root.path()).unwrap();
+        assert_eq!(fresh.load_last_world().as_deref(), Some("todo"));
+    }
+
+    #[test]
+    fn no_last_world_file_means_no_last_world() {
+        let root = TempRoot::new("last-world-none");
+        assert_eq!(FileStore::open(root.path()).unwrap().load_last_world(), None);
+    }
+
+    #[test]
+    fn a_garbled_last_world_file_means_no_last_world() {
+        let root = TempRoot::new("last-world-garbled");
+        fs::write(root.path().join(LAST_WORLD_FILE), "not the format\n").unwrap();
+        assert_eq!(FileStore::open(root.path()).unwrap().load_last_world(), None);
+    }
+
+    #[test]
+    fn the_last_world_file_is_not_a_board() {
+        let root = TempRoot::new("last-world-hidden");
+        let mut store = FileStore::open(root.path()).unwrap();
+        store.save(&[Board::new("ideas")]).unwrap();
+        store.save_last_world("ideas").unwrap();
+        let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["ideas"]);
+    }
+
+    /// Staying in one world must not add a commit on every quit.
+    #[test]
+    fn recording_the_same_world_again_leaves_the_file_alone() {
+        let root = TempRoot::new("last-world-same");
+        let path = root.path().join(LAST_WORLD_FILE);
+        fs::write(&path, render_last_world("ideas", 42)).unwrap();
+        let mut store = FileStore::open(root.path()).unwrap();
+        store.save_last_world("ideas").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), render_last_world("ideas", 42));
+        store.save_last_world("todo").unwrap();
+        let (name, at) = parse_last_world(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(name, "todo");
+        assert!(at > 42, "a new world is stamped now");
+    }
+
+    #[test]
+    fn a_last_world_file_without_at_parses_as_the_oldest() {
+        assert_eq!(parse_last_world("world: ideas\n"), Some(("ideas".to_string(), 0)));
+        assert_eq!(parse_last_world("world: \nat: 5\n"), None);
     }
 }
 

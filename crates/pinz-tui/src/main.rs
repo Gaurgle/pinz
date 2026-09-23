@@ -806,6 +806,9 @@ fn run_app(opts: Options) -> io::Result<()> {
         boards.push(first_board());
     }
     let mut app = App::new(boards);
+    if let Some(name) = store.load_last_world() {
+        app.open_world(&name);
+    }
     if let Some(pid) = busy_pid {
         app.set_read_only(true);
         app.set_warning(format!(
@@ -1021,7 +1024,8 @@ fn skipped_message(skipped: &[PathBuf], root: &Path) -> Option<String> {
     Some(format!("{head}: {}", names.join(", ")))
 }
 
-/// Remove the worlds the app dropped, then write what is left.
+/// Remove the worlds the app dropped, then write what is left, then record
+/// the open world so the next session starts there.
 ///
 /// Deletes first: a save writes every board it is handed, so doing it the other
 /// way round would recreate a directory we are about to remove. A world that
@@ -1034,7 +1038,9 @@ fn persist(app: &mut App, store: &mut dyn Store) -> Result<SaveReport, StoreErro
             Err(e) => return Err(e),
         }
     }
-    store.save(app.boards())
+    let report = store.save(app.boards())?;
+    store.save_last_world(&app.active_board().name)?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1133,6 +1139,18 @@ mod tests {
 
         let names: Vec<String> = store.load().unwrap().into_iter().map(|b| b.name).collect();
         assert_eq!(names, ["ideas"]);
+    }
+
+    #[test]
+    fn a_save_records_the_open_world() {
+        let mut store = pinz_core::MemoryStore::empty();
+        let mut app = app_on_a_spare_world(&mut store);
+        persist(&mut app, &mut store).unwrap();
+        assert_eq!(
+            store.load_last_world().as_deref(),
+            Some(app.active_board().name.as_str())
+        );
+        assert_ne!(app.active_index(), 0, "the spare world, not the first");
     }
 
     #[test]
