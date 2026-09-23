@@ -353,6 +353,11 @@ on both ends, where a single board file would conflict on any change at all.
 Saves are incremental - only files whose bytes actually changed get rewritten, so
 dragging a note doesn't churn the history.
 
+Beside the boards sits `.pinz-world`, naming the world that was open when you
+last quit. pinz opens there next time, and since it syncs with the pins, that
+holds on the other machine too. If both machines switched worlds between syncs,
+the pull keeps whichever switch was more recent rather than stopping.
+
 ## Syncing your machines
 
 Setup lives under [Install](#install); this is what sync does once it is running.

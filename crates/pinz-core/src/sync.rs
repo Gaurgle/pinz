@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::file_store::{parse_last_world, render_last_world, LAST_WORLD_FILE};
 use crate::merge::merge_pin;
 use std::process::Command;
 
@@ -285,15 +286,19 @@ impl Sync {
         // because that is every commit the rebase can possibly stop on.
         let mut merged_pins = 0usize;
         for _ in 0..ahead {
-            let Some(conflicts) = self.conflicted_pin_files() else {
+            let Some(conflicts) = self.conflicted_files() else {
                 return stop();
             };
-            for file in &conflicts {
-                if !self.resolve_pin_conflict(file) {
+            for conflict in &conflicts {
+                let settled = match conflict {
+                    Conflict::Pin(file) => self.resolve_pin_conflict(file),
+                    Conflict::LastWorld => self.resolve_last_world_conflict(),
+                };
+                if !settled {
                     return stop();
                 }
             }
-            merged_pins += conflicts.len();
+            merged_pins += conflicts.iter().filter(|c| matches!(c, Conflict::Pin(_))).count();
             // `core.editor=true` keeps the reworded-commit editor from ever
             // opening; the message is kept as it was.
             match self.git(&["-c", "core.editor=true", "rebase", "--continue"]) {
@@ -310,10 +315,11 @@ impl Sync {
     }
 
     /// The files the stopped rebase is conflicted on - but only if every one
-    /// of them is a both-modified `.md` file. Any other conflict shape (a
-    /// delete against an edit, both machines adding different files, a
-    /// non-pin file) means this is not ours to settle: `None`.
-    fn conflicted_pin_files(&self) -> Option<Vec<String>> {
+    /// of them is ours to settle: a both-modified `.md` pin, or `.pinz-world`
+    /// modified or added on both sides. Any other conflict shape (a delete
+    /// against an edit, both machines adding different pins, some other file)
+    /// is a judgement call: `None`.
+    fn conflicted_files(&self) -> Option<Vec<Conflict>> {
         // `-z` gives NUL-separated entries with unquoted paths, so board names
         // with spaces survive.
         let out = self.git(&["status", "--porcelain", "-z"])?;
@@ -327,10 +333,14 @@ impl Sync {
             if !code.contains('U') && code != "AA" && code != "DD" {
                 continue; // not a conflict entry (a cleanly-applied file)
             }
+            if path == LAST_WORLD_FILE && (code == "UU" || code == "AA") {
+                conflicts.push(Conflict::LastWorld);
+                continue;
+            }
             if code != "UU" || !path.ends_with(".md") {
                 return None;
             }
-            conflicts.push(path.to_string());
+            conflicts.push(Conflict::Pin(path.to_string()));
         }
         if conflicts.is_empty() {
             return None; // stopped for a reason we do not understand
@@ -358,6 +368,34 @@ impl Sync {
             return false;
         }
         self.git(&["add", "--", file]).is_some_and(|r| r.ok)
+    }
+
+    /// Settle `.pinz-world` by keeping the side with the later `at`: the world
+    /// most recently opened on either machine. Local on a tie; a side that
+    /// does not parse loses, and neither parsing stops the sync. Stage 2 is
+    /// upstream and stage 3 the local commit, as in
+    /// [`Sync::resolve_pin_conflict`].
+    fn resolve_last_world_conflict(&self) -> bool {
+        let show = |stage: char| {
+            self.git(&["show", &format!(":{stage}:{LAST_WORLD_FILE}")])
+                .filter(|r| r.ok)
+                .map(|r| r.stdout)
+        };
+        let (Some(remote), Some(local)) = (show('2'), show('3')) else {
+            return false;
+        };
+        let (remote, local) = (parse_last_world(&remote), parse_last_world(&local));
+        let at = |side: &Option<(String, u64)>| side.as_ref().map(|(_, at)| *at);
+        let keep = if at(&remote) > at(&local) { remote } else { local };
+        // Re-rendered, not copied: `git` output comes back trimmed.
+        let Some((name, at)) = keep else {
+            return false;
+        };
+        let path = self.root.join(LAST_WORLD_FILE);
+        if std::fs::write(path, render_last_world(&name, at)).is_err() {
+            return false;
+        }
+        self.git(&["add", "--", LAST_WORLD_FILE]).is_some_and(|r| r.ok)
     }
 
     /// Checkpoint whatever changed, without sending it anywhere.
@@ -458,6 +496,14 @@ impl Sync {
             None => SyncOutcome::Idle("git is not on PATH".into()),
         }
     }
+}
+
+/// A conflicted file a stopped rebase can settle by itself.
+enum Conflict {
+    /// A both-modified pin, merged field by field.
+    Pin(String),
+    /// `.pinz-world`, settled to the newer side.
+    LastWorld,
 }
 
 fn first_line(s: &str) -> &str {
@@ -1058,5 +1104,86 @@ mod tests {
             Sync::new(t.path()).remote_url().as_deref(),
             Some("git@github.com:someone/pinz-board.git")
         );
+    }
+
+    /// Two machines, both with `.pinz-world` written as given (None leaves it
+    /// out of the shared start), each with a pin of their own on top. Returns
+    /// what B's pull did and B's `.pinz-world` afterwards.
+    fn both_switched_worlds(
+        tag: &str,
+        shared: Option<&str>,
+        on_a: &str,
+        on_b: &str,
+    ) -> (SyncOutcome, String, Temp) {
+        use crate::file_store::LAST_WORLD_FILE;
+        let remote = Temp::new(&format!("{tag}-remote"));
+        assert!(git_in(remote.path(), &["init", "--bare", "--quiet"]));
+        let a = Temp::new(&format!("{tag}-a"));
+        init_repo(a.path());
+        git_in(
+            a.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        write_pin(a.path(), "ideas", "shared.md", "# shared\n");
+        if let Some(shared) = shared {
+            fs::write(a.path().join(LAST_WORLD_FILE), shared).unwrap();
+        }
+        Sync::new(a.path()).push("pinz: original");
+
+        let b = Temp::new(&format!("{tag}-b"));
+        clone_repo(remote.path(), b.path());
+
+        fs::write(a.path().join(LAST_WORLD_FILE), on_a).unwrap();
+        write_pin(a.path(), "ideas", "from-a.md", "# from a\n");
+        Sync::new(a.path()).push("pinz: from a");
+        fs::write(b.path().join(LAST_WORLD_FILE), on_b).unwrap();
+        write_pin(b.path(), "ideas", "from-b.md", "# from b\n");
+        Sync::new(b.path()).push("pinz: from b"); // commits, push is rejected
+
+        let out = Sync::new(b.path()).pull();
+        let world = fs::read_to_string(b.path().join(LAST_WORLD_FILE)).unwrap_or_default();
+        (out, world, b)
+    }
+
+    /// Switching worlds on both machines between syncs must not stop the sync:
+    /// the pins riding along would be stuck behind it.
+    #[test]
+    fn both_machines_switching_worlds_keeps_the_newer_one() {
+        let (out, world, b) = both_switched_worlds(
+            "world-remote-newer",
+            Some("world: ideas\nat: 100\n"),
+            "world: todo\nat: 300\n",
+            "world: sketches\nat: 200\n",
+        );
+        assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
+        assert_eq!(world, "world: todo\nat: 300\n", "the remote side is newer");
+        assert!(b.path().join("ideas/from-a.md").exists());
+        assert!(b.path().join("ideas/from-b.md").exists());
+    }
+
+    #[test]
+    fn a_newer_local_world_survives_the_pull() {
+        let (out, world, _b) = both_switched_worlds(
+            "world-local-newer",
+            Some("world: ideas\nat: 100\n"),
+            "world: todo\nat: 200\n",
+            "world: sketches\nat: 300\n",
+        );
+        assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
+        assert_eq!(world, "world: sketches\nat: 300\n");
+    }
+
+    /// The first time two machines each write the file, git sees both adding
+    /// it (`AA`) rather than both modifying it.
+    #[test]
+    fn both_machines_creating_the_world_file_keeps_the_newer_one() {
+        let (out, world, _b) = both_switched_worlds(
+            "world-both-added",
+            None,
+            "world: todo\nat: 300\n",
+            "world: sketches\nat: 200\n",
+        );
+        assert!(matches!(out, SyncOutcome::Done(_)), "got {out:?}");
+        assert_eq!(world, "world: todo\nat: 300\n");
     }
 }

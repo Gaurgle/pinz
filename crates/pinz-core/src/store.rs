@@ -70,17 +70,36 @@ pub trait Store {
     /// another machine's world, arrived by sync, would look the same. Deleting
     /// is a thing you say, not something inferred from an absence.
     fn delete_board(&mut self, name: &str) -> Result<()>;
+
+    /// The world that was open when the board was last left, if one was
+    /// recorded. A store that keeps no such thing opens on the first world,
+    /// which is what this default says.
+    fn load_last_world(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Record the open world, so the next session starts there.
+    ///
+    /// Separate from `save` because it is not a board: it is where you were,
+    /// and it changes without any pin changing.
+    fn save_last_world(&mut self, _name: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// In-memory store, optionally seeded with demo content. Enough to bring a
 /// renderer up and to test against; not persistent.
 pub struct MemoryStore {
     boards: Vec<Board>,
+    last_world: Option<String>,
 }
 
 impl MemoryStore {
     pub fn empty() -> Self {
-        Self { boards: Vec::new() }
+        Self {
+            boards: Vec::new(),
+            last_world: None,
+        }
     }
 
     /// A store carrying the demo boards.
@@ -92,6 +111,7 @@ impl MemoryStore {
     pub fn seeded() -> Self {
         Self {
             boards: seed_boards(),
+            last_world: None,
         }
     }
 }
@@ -113,6 +133,15 @@ impl Store for MemoryStore {
         if self.boards.len() == before {
             return Err(StoreError::NotFound(name.to_string()));
         }
+        Ok(())
+    }
+
+    fn load_last_world(&mut self) -> Option<String> {
+        self.last_world.clone()
+    }
+
+    fn save_last_world(&mut self, name: &str) -> Result<()> {
+        self.last_world = Some(name.to_string());
         Ok(())
     }
 }
@@ -202,5 +231,17 @@ mod tests {
         let boards = vec![Board::new("scratch")];
         store.save(&boards).unwrap();
         assert_eq!(store.load().unwrap(), boards);
+    }
+
+    #[test]
+    fn a_fresh_store_remembers_no_world() {
+        assert_eq!(MemoryStore::empty().load_last_world(), None);
+    }
+
+    #[test]
+    fn the_last_world_round_trips() {
+        let mut store = MemoryStore::empty();
+        store.save_last_world("todo").unwrap();
+        assert_eq!(store.load_last_world().as_deref(), Some("todo"));
     }
 }
