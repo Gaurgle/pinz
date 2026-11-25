@@ -161,6 +161,7 @@ fn seed_boards() -> Vec<Board> {
             y,
             z: id as u32,
             color,
+            pickup: false,
             extra: Vec::new(),
         }
     };

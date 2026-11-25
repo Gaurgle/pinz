@@ -60,6 +60,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// Width of one column of the key list: the widest key, a space, its label.
 const HELP_COL: u16 = 34;
 
+/// Marks a pin set to pick up: in its border title, and alone at cluster zoom.
+const PICKUP_GLYPH: &str = "▲";
+
 /// Where the groups split between the two columns. One column would run to
 /// about 35 rows, which does not fit an 80x24 terminal. Chosen to balance the
 /// two, so the panel is only as tall as its longer half.
@@ -86,6 +89,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("e / enter", "edit it"),
             ("y", "copy it whole"),
             ("c / C", "color, backwards"),
+            ("P", "mark to pick up"),
             ("d / x / del", "delete it"),
             ("drag", "move it"),
             ("shift + ← ↑ → ↓", "step between pins"),
@@ -441,6 +445,13 @@ fn draw_cluster(
                     cell.set_symbol("●").set_fg(theme.accent);
                 }
             }
+            // Top-right corner, clear of the selection dot in the middle.
+            if note.pickup {
+                let corner = (rect.x + rect.width.saturating_sub(1), rect.y);
+                if let Some(cell) = frame.buffer_mut().cell_mut(corner) {
+                    cell.set_symbol(PICKUP_GLYPH).set_fg(theme.note_fg);
+                }
+            }
         }
     }
 }
@@ -470,12 +481,22 @@ fn draw_note_widget(
     } else {
         Style::new().fg(theme.note_fg)
     };
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(Span::styled("📌", Style::new().fg(theme.note_fg)))
         .style(Style::new().bg(color).fg(theme.note_fg));
+    // On the border, not inside: the interior wrap is shared with hit-testing.
+    if note.pickup {
+        block = block.title(
+            Line::from(Span::styled(
+                format!(" {PICKUP_GLYPH} pick up "),
+                Style::new().fg(theme.note_fg).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ))
+            .right_aligned(),
+        );
+    }
 
     // Everything below paints into note-local coordinates: a rect the size of the
     // whole note, at (0,0). `paint_clipped` puts the visible window of it on
@@ -997,6 +1018,56 @@ mod tests {
         );
     }
 
+    /// One pin, marked for pickup or not, drawn after `zoom_out` presses of `-`.
+    fn drawn_pin_with_pickup(pickup: bool, zoom_out: usize) -> String {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let mut store = MemoryStore::seeded();
+        let mut boards = store.load().unwrap();
+        boards[0].notes.clear();
+        boards[0].notes.push(pinz_core::Note {
+            id: 901,
+            title: "HANDOFF".into(),
+            body: String::new(),
+            x: 0.0,
+            y: 0.0,
+            z: 1,
+            color: pinz_core::Color::Yellow,
+            pickup,
+            extra: Vec::new(),
+        });
+        let mut app = App::new(boards);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        for _ in 0..zoom_out {
+            app.on_key(KeyEvent {
+                code: KeyCode::Char('-'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            });
+        }
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        buffer_text(&terminal.backend().buffer().clone())
+    }
+
+    #[test]
+    fn a_pickup_pin_says_so_on_its_border_and_a_plain_one_does_not() {
+        let marked = drawn_pin_with_pickup(true, 0);
+        let plain = drawn_pin_with_pickup(false, 0);
+        assert!(marked.contains("HANDOFF") && marked.contains("pick up"), "{marked}");
+        assert!(plain.contains("HANDOFF") && !plain.contains("pick up"), "{plain}");
+    }
+
+    #[test]
+    fn a_pickup_pin_keeps_a_mark_at_cluster_zoom() {
+        // Zoomed all the way out there is no text, so the mark is a glyph.
+        let marked = drawn_pin_with_pickup(true, 10);
+        let plain = drawn_pin_with_pickup(false, 10);
+        assert!(!marked.contains("HANDOFF"), "at cluster zoom:\n{marked}");
+        assert!(marked.contains(PICKUP_GLYPH), "{marked}");
+        assert!(!plain.contains(PICKUP_GLYPH), "{plain}");
+    }
+
     /// A board holding one pin whose body is `rows` numbered lines, opened in
     /// the editor and drawn once.
     fn drawn_editing_a_note_of(rows: usize) -> (String, Terminal<TestBackend>) {
@@ -1017,6 +1088,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let mut app = App::new(boards);
@@ -1084,6 +1156,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let mut app = App::new(boards);
@@ -1149,6 +1222,7 @@ mod tests {
             y: 100.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let mut app = App::new(boards);
@@ -1198,6 +1272,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let mut app = App::new(boards);

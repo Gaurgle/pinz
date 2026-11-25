@@ -40,6 +40,7 @@ pub fn merge_pin(base: Option<&str>, remote: &str, local: &str) -> Option<String
         y: pick(base.as_ref().map(|b| b.y), remote.y, local.y),
         z: pick(base.as_ref().map(|b| b.z), remote.z, local.z),
         color: pick(base.as_ref().map(|b| b.color), remote.color, local.color),
+        pickup: pick(base.as_ref().map(|b| b.pickup), remote.pickup, local.pickup),
         extra: pick(base.as_ref().map(|b| b.extra.clone()), remote.extra, local.extra),
     };
     Some(render_pin(&merged))
@@ -188,13 +189,24 @@ mod tests {
 
     #[test]
     fn unknown_keys_set_there_survive_a_move_here() {
-        // A pickup marked on the other machine, the pin dragged on this one.
+        // A key another tool wrote on the other machine, the pin dragged on this one.
         let base = pin(0, 0, 1, "yellow", "t", "body");
-        let remote = base.replacen("color: yellow\n", "color: yellow\npickup: true\n", 1);
+        let remote = base.replacen("color: yellow\n", "color: yellow\nsource: notez\n", 1);
         let local = pin(30, 0, 1, "yellow", "t", "body");
         let merged = merge_pin(Some(&base), &remote, &local).expect("should merge");
-        assert!(merged.contains("pickup: true"), "remote key kept:\n{merged}");
+        assert!(merged.contains("source: notez"), "remote key kept:\n{merged}");
         assert!(merged.contains("x: 30"), "local move kept:\n{merged}");
+    }
+
+    #[test]
+    fn a_pickup_set_there_survives_a_key_written_here() {
+        // pickup merges on its own, not as part of the unknown keys.
+        let base = pin(0, 0, 1, "yellow", "t", "body");
+        let remote = base.replacen("color: yellow\n", "color: yellow\npickup: true\n", 1);
+        let local = base.replacen("color: yellow\n", "color: yellow\nsource: notez\n", 1);
+        let merged = merge_pin(Some(&base), &remote, &local).expect("should merge");
+        assert!(merged.contains("pickup: true"), "remote pickup kept:\n{merged}");
+        assert!(merged.contains("source: notez"), "local key kept:\n{merged}");
     }
 
     #[test]

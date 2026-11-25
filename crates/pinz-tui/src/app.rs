@@ -629,6 +629,13 @@ impl App {
         }
     }
 
+    fn toggle_pickup(&mut self) {
+        let Some(id) = self.selected else { return };
+        if let Some(note) = self.note_mut(id) {
+            note.pickup = !note.pickup;
+        }
+    }
+
     /// Record the viewport the board was last drawn into, and center the board
     /// the first time we know how big it is.
     pub fn set_viewport(&mut self, area: Rect) {
@@ -711,6 +718,7 @@ impl App {
             KeyCode::Char('T') => self.cycle_theme(false),
             KeyCode::Char('c') => self.cycle_note_color(true),
             KeyCode::Char('C') => self.cycle_note_color(false),
+            KeyCode::Char('P') => self.toggle_pickup(),
             KeyCode::Char('w') => self.begin_new_world(),
             KeyCode::Char('W') => self.begin_delete_world(),
             KeyCode::Char('y') => self.yank_note(),
@@ -1975,6 +1983,7 @@ impl App {
             y: center.y,
             z: top + 1,
             color,
+            pickup: false,
             extra: Vec::new(),
         });
         self.selected = Some(id);
@@ -2069,6 +2078,7 @@ mod tests {
                 y: *y,
                 z: i as u32 + 1,
                 color: Color::Yellow,
+                pickup: false,
                 extra: Vec::new(),
             });
         }
@@ -2703,6 +2713,35 @@ mod tests {
     }
 
     #[test]
+    fn shift_p_toggles_pickup_on_the_selected_pin_and_undoes() {
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Esc));
+        let id = a.selected().unwrap();
+        let pickup_of = |a: &App| a.active_board().notes.iter().find(|n| n.id == id).unwrap().pickup;
+        assert!(!pickup_of(&a));
+
+        let before = a.revision();
+        a.on_key(key(KeyCode::Char('P')));
+        assert!(pickup_of(&a), "P marks it");
+        assert!(a.revision() > before, "marking is a change that saves");
+
+        a.on_key(key(KeyCode::Char('P')));
+        assert!(!pickup_of(&a), "P again clears it");
+
+        a.on_key(key(KeyCode::Char('u')));
+        assert!(pickup_of(&a), "undo brings the mark back");
+    }
+
+    #[test]
+    fn shift_p_with_nothing_selected_does_nothing() {
+        let mut a = app();
+        let before = a.revision();
+        a.on_key(key(KeyCode::Char('P')));
+        assert_eq!(a.revision(), before);
+    }
+
+    #[test]
     fn ctrl_backspace_deletes_a_word_while_editing() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('n'))); // edit, editor holds "new note"
@@ -3187,6 +3226,7 @@ mod tests {
             y: 300.0,
             z: 1,
             color: Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         a.active_board_mut().notes.push(Note {
@@ -3197,6 +3237,7 @@ mod tests {
             y: 300.0,
             z: 2,
             color: Color::Blue,
+            pickup: false,
             extra: Vec::new(),
         });
         a.center_on_content();
@@ -4023,6 +4064,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let mut a = App::new(vec![board]);
@@ -4322,6 +4364,7 @@ mod tests {
             y: 0.0,
             z: 2,
             color: Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         });
         let first = cell_of_note(&a, 1);
