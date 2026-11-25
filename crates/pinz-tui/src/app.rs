@@ -1975,6 +1975,7 @@ impl App {
             y: center.y,
             z: top + 1,
             color,
+            extra: Vec::new(),
         });
         self.selected = Some(id);
         // Already at document zoom (set above); settle the camera and open the
@@ -2068,6 +2069,7 @@ mod tests {
                 y: *y,
                 z: i as u32 + 1,
                 color: Color::Yellow,
+                extra: Vec::new(),
             });
         }
         let mut a = App::new(vec![board]);
@@ -3185,6 +3187,7 @@ mod tests {
             y: 300.0,
             z: 1,
             color: Color::Yellow,
+            extra: Vec::new(),
         });
         a.active_board_mut().notes.push(Note {
             id: 200,
@@ -3194,6 +3197,7 @@ mod tests {
             y: 300.0,
             z: 2,
             color: Color::Blue,
+            extra: Vec::new(),
         });
         a.center_on_content();
 
@@ -4019,6 +4023,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: Color::Yellow,
+            extra: Vec::new(),
         });
         let mut a = App::new(vec![board]);
         a.set_viewport(VIEWPORT);
@@ -4317,6 +4322,7 @@ mod tests {
             y: 0.0,
             z: 2,
             color: Color::Yellow,
+            extra: Vec::new(),
         });
         let first = cell_of_note(&a, 1);
         let second = cell_of_note(&a, 2);

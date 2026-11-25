@@ -348,6 +348,9 @@ pub fn render_pin(note: &Note) -> String {
     out.push_str(&format!("y: {}\n", note.y.round() as i64));
     out.push_str(&format!("z: {}\n", note.z));
     out.push_str(&format!("color: {}\n", note.color.as_str()));
+    for (key, value) in &note.extra {
+        out.push_str(&format!("{key}: {value}\n"));
+    }
     out.push_str("---\n");
     out.push_str(&format!("# {}\n", note.title));
     if !note.body.is_empty() {
@@ -364,7 +367,18 @@ pub fn render_pin(note: &Note) -> String {
 /// field, still loads as a pin at the origin rather than failing the whole
 /// board. Losing a note's text to a strict parser would be the worse outcome.
 pub fn parse_pin(text: &str, id: u64) -> Note {
-    let (fields, rest) = split_frontmatter(text);
+    let (pairs, rest) = split_frontmatter(text);
+    let mut fields = HashMap::new();
+    let mut extra: Vec<(String, String)> = Vec::new();
+    for (key, value) in pairs {
+        if OWNED_KEYS.contains(&key.as_str()) {
+            fields.insert(key, value);
+        } else if let Some(slot) = extra.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            extra.push((key, value));
+        }
+    }
 
     let (title, body) = split_title_and_body(rest);
     Note {
@@ -378,13 +392,18 @@ pub fn parse_pin(text: &str, id: u64) -> Note {
             .get("color")
             .and_then(|v| v.parse().ok())
             .unwrap_or(Color::Yellow),
+        extra,
     }
 }
 
-/// Split a leading `---` block into `key: value` pairs, returning the pairs and
-/// the remaining text. No frontmatter means no pairs and the text unchanged.
-fn split_frontmatter(text: &str) -> (HashMap<String, String>, &str) {
-    let mut fields = HashMap::new();
+/// The frontmatter keys `render_pin` writes itself; every other key is `extra`.
+const OWNED_KEYS: [&str; 4] = ["x", "y", "z", "color"];
+
+/// Split a leading `---` block into `key: value` pairs in file order, returning
+/// the pairs and the remaining text. No frontmatter means no pairs and the text
+/// unchanged.
+fn split_frontmatter(text: &str) -> (Vec<(String, String)>, &str) {
+    let mut fields = Vec::new();
     let Some(after_open) = text.strip_prefix("---\n") else {
         return (fields, text);
     };
@@ -394,7 +413,7 @@ fn split_frontmatter(text: &str) -> (HashMap<String, String>, &str) {
     let (block, tail) = after_open.split_at(end);
     for line in block.lines() {
         if let Some((key, value)) = line.split_once(':') {
-            fields.insert(key.trim().to_string(), value.trim().to_string());
+            fields.push((key.trim().to_string(), value.trim().to_string()));
         }
     }
     let rest = tail
@@ -496,6 +515,7 @@ mod tests {
             y: 110.0,
             z: 3,
             color: Color::Green,
+            extra: Vec::new(),
         }
     }
 
@@ -563,6 +583,49 @@ mod tests {
     fn an_unknown_color_falls_back_rather_than_failing() {
         let parsed = parse_pin("---\ncolor: chartreuse\n---\n# t\n", 1);
         assert_eq!(parsed.color, Color::Yellow);
+    }
+
+    #[test]
+    fn unknown_frontmatter_keys_survive_a_save() {
+        // syncz and notez read keys pinz does not own; a move or an edit must
+        // not drop them.
+        let text = "---\nx: 1\ny: 2\nz: 3\ncolor: green\npickup: true\nflags: prio idea\n---\n# t\n";
+        let mut parsed = parse_pin(text, 1);
+        assert_eq!(
+            parsed.extra,
+            [
+                ("pickup".to_string(), "true".to_string()),
+                ("flags".to_string(), "prio idea".to_string()),
+            ]
+        );
+        assert_eq!(render_pin(&parsed), text);
+
+        parsed.x = 50.0;
+        let moved = render_pin(&parsed);
+        assert!(moved.contains("x: 50\n"), "{moved}");
+        assert!(moved.contains("pickup: true\nflags: prio idea\n"), "{moved}");
+    }
+
+    #[test]
+    fn unknown_keys_render_after_the_owned_ones_in_file_order() {
+        let parsed = parse_pin("---\nzeta: 1\nx: 4\nalpha: 2\n---\n# t\n", 1);
+        let text = render_pin(&parsed);
+        assert_eq!(
+            text,
+            "---\nx: 4\ny: 0\nz: 0\ncolor: yellow\nzeta: 1\nalpha: 2\n---\n# t\n"
+        );
+        assert_eq!(render_pin(&parse_pin(&text, 1)), text, "a second save is a no-op");
+    }
+
+    #[test]
+    fn a_repeated_unknown_key_keeps_its_last_value() {
+        let parsed = parse_pin("---\npickup: false\npickup: true\n---\n# t\n", 1);
+        assert_eq!(parsed.extra, [("pickup".to_string(), "true".to_string())]);
+    }
+
+    #[test]
+    fn a_pin_without_unknown_keys_has_no_extra() {
+        assert!(parse_pin(&render_pin(&note(1, "t", "b")), 1).extra.is_empty());
     }
 
     #[test]

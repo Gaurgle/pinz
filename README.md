@@ -347,6 +347,9 @@ color: green
 The one by the desk flickers.
 ```
 
+pinz owns `x`, `y`, `z` and `color`. Any other frontmatter key, written by
+hand or by another tool, is kept as it is when pinz saves the pin.
+
 One file per pin is a sync decision: these files live in a git repo shared
 between machines, and per-pin files conflict only when the *same pin* was edited
 on both ends, where a single board file would conflict on any change at all.
