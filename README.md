@@ -16,7 +16,8 @@ switchable "worlds".
 A pannable, zoomable board of post-it notes with a four-level detail ladder,
 switchable worlds, and mouse move/select. Notes edit in place through one
 word-wrapped editor - the first line is the title, the rest the body - with text
-selection, copy and paste.
+selection, copy and paste. A pin can be marked to pick up next, for the
+handoff you leave yourself.
 
 **Your pins live in a second repo of your own**, not in this one: `~/pinz-board`
 by default, or wherever `$PINZ_HOME` points. It is an ordinary private git repo,
@@ -274,12 +275,20 @@ No two pins on a board can end up in the same spot. A new pin, a dropped pin and
 a pin arriving from another world all cascade down-right until they are clear,
 so a pin can overlap its neighbours but can never vanish behind one.
 
+### Pickup
+
+`P` marks the selected pin as one to pick up next: `pickup: true` in its
+frontmatter, a `▲ pick up` tag on its border, and a `▲` in its corner when zoomed
+all the way out. `P` again clears it. The mark is for other tools to read (syncz
+will list marked pins from every world); only pinz clears it.
+
 ### Undo
 
 `u` undoes, `ctrl`+`r` redoes, and pinz remembers the last 50 changes. Undo
-covers anything that changes a board: new pins, deletes, recolors, edits, moves,
-new and deleted worlds, and pins sent to another world. Undoing a change made on another
-world takes you back to that world so you can see it happen.
+covers anything that changes a board: new pins, deletes, recolors, pickup marks,
+edits, moves, new and deleted worlds, and pins sent to another world. Undoing a
+change made on another world takes you back to that world so you can see it
+happen.
 
 The step size is what you would expect rather than what is easy: a whole drag is
 one step, and a whole editing session in a note is one step, not one per
@@ -350,13 +359,6 @@ The one by the desk flickers.
 
 pinz owns `x`, `y`, `z`, `color` and `pickup`. Any other frontmatter key, written
 by hand or by another tool, is kept as it is when pinz saves the pin.
-
-### Pickup
-
-`P` marks the selected pin as one to pick up next: `pickup: true` in its
-frontmatter, a `▲ pick up` tag on its border, and a `▲` in its corner when zoomed
-all the way out. `P` again clears it. The mark is for other tools to read (syncz
-will list marked pins from every world); only pinz clears it.
 
 One file per pin is a sync decision: these files live in a git repo shared
 between machines, and per-pin files conflict only when the *same pin* was edited
