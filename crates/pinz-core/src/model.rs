@@ -111,9 +111,12 @@ pub struct Note {
     /// Stack order; higher sits on top. Dragging a note to the front raises it.
     pub z: u32,
     pub color: Color,
-    /// Frontmatter keys pinz does not own (`pickup`, `flags`, anything a
-    /// sibling tool writes), in file order, one entry per key. Kept so a save
-    /// never drops what another tool reads.
+    /// "Act on this next": syncz lists these from every world. Cleared only
+    /// in pinz; written as `pickup: true`, and absent when false.
+    pub pickup: bool,
+    /// Frontmatter keys pinz does not own (`flags`, anything a sibling tool
+    /// writes), in file order, one entry per key. Kept so a save never drops
+    /// what another tool reads.
     pub extra: Vec<(String, String)>,
 }
 
@@ -238,6 +241,7 @@ mod tests {
             y,
             z,
             color: Color::Yellow,
+            pickup: false,
             extra: Vec::new(),
         }
     }

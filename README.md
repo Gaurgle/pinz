@@ -218,7 +218,8 @@ and centers it; first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves; the note scrolls with the wheel or by
 moving the caret past an edge),
-`y` to copy the whole note, `c` cycles its color (`C` backwards), `d` to delete,
+`y` to copy the whole note, `c` cycles its color (`C` backwards), `P` marks it to pick up (see
+[Pickup](#pickup)), `d` to delete,
 `u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
 the active one is named in the header), `q` to quit.
 
@@ -347,8 +348,15 @@ color: green
 The one by the desk flickers.
 ```
 
-pinz owns `x`, `y`, `z` and `color`. Any other frontmatter key, written by
-hand or by another tool, is kept as it is when pinz saves the pin.
+pinz owns `x`, `y`, `z`, `color` and `pickup`. Any other frontmatter key, written
+by hand or by another tool, is kept as it is when pinz saves the pin.
+
+### Pickup
+
+`P` marks the selected pin as one to pick up next: `pickup: true` in its
+frontmatter, a `▲ pick up` tag on its border, and a `▲` in its corner when zoomed
+all the way out. `P` again clears it. The mark is for other tools to read (syncz
+will list marked pins from every world); only pinz clears it.
 
 One file per pin is a sync decision: these files live in a git repo shared
 between machines, and per-pin files conflict only when the *same pin* was edited

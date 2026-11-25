@@ -348,6 +348,9 @@ pub fn render_pin(note: &Note) -> String {
     out.push_str(&format!("y: {}\n", note.y.round() as i64));
     out.push_str(&format!("z: {}\n", note.z));
     out.push_str(&format!("color: {}\n", note.color.as_str()));
+    if note.pickup {
+        out.push_str("pickup: true\n");
+    }
     for (key, value) in &note.extra {
         out.push_str(&format!("{key}: {value}\n"));
     }
@@ -392,12 +395,13 @@ pub fn parse_pin(text: &str, id: u64) -> Note {
             .get("color")
             .and_then(|v| v.parse().ok())
             .unwrap_or(Color::Yellow),
+        pickup: fields.get("pickup").is_some_and(|v| v.eq_ignore_ascii_case("true")),
         extra,
     }
 }
 
 /// The frontmatter keys `render_pin` writes itself; every other key is `extra`.
-const OWNED_KEYS: [&str; 4] = ["x", "y", "z", "color"];
+const OWNED_KEYS: [&str; 5] = ["x", "y", "z", "color", "pickup"];
 
 /// Split a leading `---` block into `key: value` pairs in file order, returning
 /// the pairs and the remaining text. No frontmatter means no pairs and the text
@@ -515,6 +519,7 @@ mod tests {
             y: 110.0,
             z: 3,
             color: Color::Green,
+            pickup: false,
             extra: Vec::new(),
         }
     }
@@ -589,12 +594,12 @@ mod tests {
     fn unknown_frontmatter_keys_survive_a_save() {
         // syncz and notez read keys pinz does not own; a move or an edit must
         // not drop them.
-        let text = "---\nx: 1\ny: 2\nz: 3\ncolor: green\npickup: true\nflags: prio idea\n---\n# t\n";
+        let text = "---\nx: 1\ny: 2\nz: 3\ncolor: green\nsource: notez\nflags: prio idea\n---\n# t\n";
         let mut parsed = parse_pin(text, 1);
         assert_eq!(
             parsed.extra,
             [
-                ("pickup".to_string(), "true".to_string()),
+                ("source".to_string(), "notez".to_string()),
                 ("flags".to_string(), "prio idea".to_string()),
             ]
         );
@@ -603,7 +608,7 @@ mod tests {
         parsed.x = 50.0;
         let moved = render_pin(&parsed);
         assert!(moved.contains("x: 50\n"), "{moved}");
-        assert!(moved.contains("pickup: true\nflags: prio idea\n"), "{moved}");
+        assert!(moved.contains("source: notez\nflags: prio idea\n"), "{moved}");
     }
 
     #[test]
@@ -619,8 +624,34 @@ mod tests {
 
     #[test]
     fn a_repeated_unknown_key_keeps_its_last_value() {
-        let parsed = parse_pin("---\npickup: false\npickup: true\n---\n# t\n", 1);
-        assert_eq!(parsed.extra, [("pickup".to_string(), "true".to_string())]);
+        let parsed = parse_pin("---\nsource: a\nsource: b\n---\n# t\n", 1);
+        assert_eq!(parsed.extra, [("source".to_string(), "b".to_string())]);
+    }
+
+    #[test]
+    fn a_pickup_pin_writes_pickup_after_color_and_before_unknown_keys() {
+        let text = "---\nx: 1\ny: 2\nz: 3\ncolor: green\npickup: true\nsource: notez\n---\n# t\n";
+        let parsed = parse_pin(text, 1);
+        assert!(parsed.pickup);
+        assert_eq!(parsed.extra, [("source".to_string(), "notez".to_string())]);
+        assert_eq!(render_pin(&parsed), text);
+    }
+
+    #[test]
+    fn a_pin_without_pickup_writes_no_pickup_line() {
+        // Absent means false, so every pin from before this key stays byte-identical.
+        let text = render_pin(&note(1, "t", "b"));
+        assert!(!parse_pin(&text, 1).pickup);
+        assert!(!text.contains("pickup"), "{text}");
+    }
+
+    #[test]
+    fn only_pickup_true_marks_a_pin() {
+        // Forgiving about case, as a hand edit might be; strict about the word.
+        for (value, marked) in [("true", true), ("True", true), ("false", false), ("yes", false), ("", false)] {
+            let parsed = parse_pin(&format!("---\npickup: {value}\n---\n# t\n"), 1);
+            assert_eq!(parsed.pickup, marked, "pickup: {value:?}");
+        }
     }
 
     #[test]

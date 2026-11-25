@@ -1,7 +1,7 @@
 # Pickup and flags: frontmatter syncz can read
 
-Date: 2026-11-25. Status: **approved** the same day; part 1 built, parts 2
-and 3 not started. Andreas's idea, from the
+Date: 2026-11-25. Status: **approved** the same day; parts 1 and 2 built,
+part 3 not started. Andreas's idea, from the
 pin `ideas/2026-11-24-180000-pinz-pickup-and-flags.md`.
 
 ## The problem
