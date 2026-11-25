@@ -111,6 +111,10 @@ pub struct Note {
     /// Stack order; higher sits on top. Dragging a note to the front raises it.
     pub z: u32,
     pub color: Color,
+    /// Frontmatter keys pinz does not own (`pickup`, `flags`, anything a
+    /// sibling tool writes), in file order, one entry per key. Kept so a save
+    /// never drops what another tool reads.
+    pub extra: Vec<(String, String)>,
 }
 
 impl Note {
@@ -234,6 +238,7 @@ mod tests {
             y,
             z,
             color: Color::Yellow,
+            extra: Vec::new(),
         }
     }
 

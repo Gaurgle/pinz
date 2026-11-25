@@ -1017,6 +1017,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            extra: Vec::new(),
         });
         let mut app = App::new(boards);
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1083,6 +1084,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            extra: Vec::new(),
         });
         let mut app = App::new(boards);
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1147,6 +1149,7 @@ mod tests {
             y: 100.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            extra: Vec::new(),
         });
         let mut app = App::new(boards);
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1195,6 +1198,7 @@ mod tests {
             y: 0.0,
             z: 1,
             color: pinz_core::Color::Yellow,
+            extra: Vec::new(),
         });
         let mut app = App::new(boards);
         let mut terminal = Terminal::new(TestBackend::new(44, 24)).unwrap();

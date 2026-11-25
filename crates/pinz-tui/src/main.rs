@@ -63,6 +63,7 @@ fn first_board() -> Board {
         y: 0.0,
         z: 1,
         color: Color::Yellow,
+        extra: Vec::new(),
     });
     board
 }
