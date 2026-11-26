@@ -49,6 +49,17 @@ impl Theme {
     }
 }
 
+/// `from` moved `fraction` (clamped to 0..=1) of the way to `to`, channel by
+/// channel. A colour that is not RGB cannot mix, so it switches at halfway.
+pub fn mix(from: Color, to: Color, fraction: f64) -> Color {
+    let t = fraction.clamp(0.0, 1.0);
+    let (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) = (from, to) else {
+        return if t < 0.5 { from } else { to };
+    };
+    let channel = |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round() as u8;
+    Color::Rgb(channel(r0, r1), channel(g0, g1), channel(b0, b1))
+}
+
 fn note_index(c: NoteColor) -> usize {
     match c {
         NoteColor::Yellow => 0,
@@ -224,5 +235,20 @@ mod tests {
         assert_eq!(index_by_name("light"), Some(4));
         assert_eq!(index_by_name("chartreuse"), None);
         assert_eq!(index_by_name(""), None);
+    }
+
+    #[test]
+    fn mixing_moves_each_channel_by_the_fraction() {
+        let (a, b) = (rgb(0, 100, 200), rgb(100, 200, 0));
+        assert_eq!(mix(a, b, 0.0), a);
+        assert_eq!(mix(a, b, 1.0), b);
+        assert_eq!(mix(a, b, 0.5), rgb(50, 150, 100));
+        assert_eq!(mix(a, b, 7.0), b, "the fraction is clamped");
+    }
+
+    #[test]
+    fn a_colour_that_is_not_rgb_does_not_mix() {
+        assert_eq!(mix(Color::Reset, rgb(1, 2, 3), 0.2), Color::Reset);
+        assert_eq!(mix(Color::Reset, rgb(1, 2, 3), 0.8), rgb(1, 2, 3));
     }
 }

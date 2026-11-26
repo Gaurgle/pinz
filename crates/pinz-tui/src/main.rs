@@ -728,18 +728,23 @@ fn report(step: &str, outcome: impl AsOutcome) {
 /// Only a push that actually moved something names a destination: `nothing to
 /// sync` has no repo to point at, and a failure already carries git's reason.
 fn report_push(sync: &Sync, commit_message: &str) {
-    let outcome = match sync.push(commit_message) {
+    report("push", push_named(sync, commit_message, color_on(&io::stdout())));
+}
+
+/// Push, with a finished push naming where the pins went.
+fn push_named(sync: &Sync, commit_message: &str, color: bool) -> SyncOutcome {
+    match sync.push(commit_message) {
         SyncOutcome::Done(what) => {
             let destination = sync.remote_url().map(|url| short_remote(&url));
-            SyncOutcome::Done(push_message(
-                &what,
-                destination.as_deref(),
-                color_on(&io::stdout()),
-            ))
+            SyncOutcome::Done(push_message(&what, destination.as_deref(), color))
         }
         other => other,
-    };
-    report("push", outcome);
+    }
+}
+
+/// The footer line for `S`: what the pull did, then what the push did.
+fn sync_summary(pulled: &SyncOutcome, pushed: &SyncOutcome) -> String {
+    format!("sync: {}; {}", pulled.message(), pushed.message())
 }
 
 /// `report`, for the lines that go to stderr because nobody asked for them.
@@ -801,7 +806,7 @@ fn run_app(opts: Options) -> io::Result<()> {
             sync_stop = Some(pulled.message().to_string());
         }
     }
-    let may_push = sync_stop.is_none();
+    let mut may_push = sync_stop.is_none();
 
     let mut boards = store.load().map_err(|e| io::Error::other(e.to_string()))?;
     if boards.is_empty() {
@@ -825,7 +830,14 @@ fn run_app(opts: Options) -> io::Result<()> {
     }
 
     let mut terminal = setup()?;
-    let result = run(&mut terminal, &mut app, &mut store, &root);
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut store,
+        &root,
+        sync.as_ref(),
+        &mut may_push,
+    );
     restore()?;
 
     let save_error = result?;
@@ -926,6 +938,8 @@ fn run(
     app: &mut App,
     store: &mut dyn Store,
     root: &Path,
+    sync: Option<&Sync>,
+    may_push: &mut bool,
 ) -> io::Result<Option<String>> {
     let mut saved = app.revision();
     let mut last = Instant::now();
@@ -966,7 +980,61 @@ fn run(
             }
             saved = app.revision();
         }
+        // After the save above, so the commit carries what is on screen.
+        if app.take_pending_sync() {
+            sync_now(terminal, app, store, sync, may_push)?;
+            saved = app.revision();
+            // The wave's first frame must not be handed the time git took.
+            last = Instant::now();
+        }
     }
+}
+
+/// `S`: the steps `pinz sync` takes, without leaving the board.
+///
+/// A stop becomes the sticky warning and costs the push on quit, as a stopped
+/// pull at startup does; a later sync that gets through lifts both again.
+fn sync_now(
+    terminal: &mut Tui,
+    app: &mut App,
+    store: &mut dyn Store,
+    sync: Option<&Sync>,
+    may_push: &mut bool,
+) -> io::Result<()> {
+    let Some(sync) = sync else {
+        app.set_status("sync is off this run (--no-sync)".into());
+        return Ok(());
+    };
+    // A fetch blocks; say why the board stopped answering.
+    app.set_status("syncing...".into());
+    terminal.draw(|frame| ui::draw(frame, app))?;
+
+    let committed = sync.commit("pinz: update pins");
+    let pulled = if committed.is_stopped() { committed } else { sync.pull() };
+    if pulled.is_stopped() {
+        *may_push = false;
+        app.set_warning(format!("{} - local-only until resolved", pulled.message()));
+        app.set_status("sync stopped".into());
+        return Ok(());
+    }
+    if !*may_push {
+        app.clear_warning();
+        *may_push = true;
+    }
+    let pushed = push_named(sync, "pinz: update pins", false);
+    if pushed.is_stopped() {
+        app.set_warning(pushed.message().to_string());
+    } else {
+        app.flash_synced();
+    }
+    if matches!(pulled, SyncOutcome::Done(_)) {
+        match store.load() {
+            Ok(boards) => app.replace_boards(boards),
+            Err(e) => app.set_warning(format!("could not re-read pins: {e}")),
+        }
+    }
+    app.set_status(sync_summary(&pulled, &pushed));
+    Ok(())
 }
 
 /// Route one terminal event into the app. Split out of [`run`] so the wiring
@@ -1574,6 +1642,30 @@ mod tests {
         assert_eq!(pin.body, "oat, not soy");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_sync_key_reports_both_halves_in_one_footer_line() {
+        let line = sync_summary(
+            &SyncOutcome::Done("pulled 2 commit(s)".into()),
+            &SyncOutcome::Done("committed and pushed to pinz-board".into()),
+        );
+        assert_eq!(line, "sync: pulled 2 commit(s); committed and pushed to pinz-board");
+    }
+
+    #[test]
+    fn the_sync_key_says_when_there_was_nothing_to_move() {
+        let line = sync_summary(
+            &SyncOutcome::Idle("already up to date".into()),
+            &SyncOutcome::Idle("nothing to sync".into()),
+        );
+        assert_eq!(line, "sync: already up to date; nothing to sync");
+    }
+
+    #[test]
+    fn a_push_names_its_destination_without_color_in_the_footer() {
+        let line = push_message("pushed", Some("pinz-board"), false);
+        assert_eq!(line, "pushed to pinz-board");
     }
 
     // The lines pinz prints around the TUI, on the way in and on the way out.

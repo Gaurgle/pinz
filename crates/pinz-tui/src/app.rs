@@ -201,6 +201,33 @@ enum Drag {
 /// trip. See `design/specs/2026-08-19-camera-glide.md`.
 const GLIDE: Duration = Duration::from_millis(140);
 
+/// How long the wave after a finished sync takes to cross the board.
+pub const SYNC_WAVE: Duration = Duration::from_millis(250);
+/// How long a yanked pin's highlight takes to sweep over it, left to right,
+/// as notez and fleetz flash a yanked row.
+pub const YANK_SWEEP: Duration = Duration::from_millis(100);
+/// How long the swept pin then takes to fade back.
+pub const YANK_FADE: Duration = Duration::from_millis(200);
+
+/// A one-off highlight over the board, drawn by the renderer from how far in
+/// it is. Changes no board data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flash {
+    /// A sync got through: a wave sweeps the board.
+    Synced,
+    /// This pin was just copied.
+    Yanked(u64),
+}
+
+impl Flash {
+    fn lasts(self) -> Duration {
+        match self {
+            Flash::Synced => SYNC_WAVE,
+            Flash::Yanked(_) => YANK_SWEEP + YANK_FADE,
+        }
+    }
+}
+
 /// A camera glide in flight: where the view was when it started, and how far
 /// through it we are. Only the origin travels; zoom cuts.
 struct Glide {
@@ -278,6 +305,11 @@ pub struct App {
     /// here touches the filesystem, so a delete is testable with no board on
     /// disk.
     pending_deletes: Vec<String>,
+    /// `S` was pressed: the runner saves, commits, pulls and pushes, then
+    /// hands the board back through [`Self::replace_boards`].
+    pending_sync: bool,
+    /// The flash being drawn and how far into it we are.
+    flash: Option<(Flash, Duration)>,
     /// A one-off message for the footer, cleared by the next event. A copy is
     /// otherwise completely invisible.
     status: Option<String>,
@@ -338,6 +370,8 @@ impl App {
             revision: 0,
             pending_copy: None,
             pending_deletes: Vec::new(),
+            pending_sync: false,
+            flash: None,
             status: None,
             warning: None,
             read_only: false,
@@ -387,7 +421,17 @@ impl App {
     /// Whether anything is moving. The runner blocks for input unless this is
     /// true, which is what keeps pinz at zero CPU sitting open on a desk.
     pub fn animating(&self) -> bool {
-        self.glide.is_some()
+        self.glide.is_some() || self.flash.is_some()
+    }
+
+    /// The flash to draw, if one is running, and how far into it we are.
+    pub fn flash(&self) -> Option<(Flash, Duration)> {
+        self.flash
+    }
+
+    /// Play the wave that says a sync got through. For the runner.
+    pub fn flash_synced(&mut self) {
+        self.flash = Some((Flash::Synced, Duration::ZERO));
     }
 
     /// Advance any animation by `dt`.
@@ -397,6 +441,12 @@ impl App {
     /// instead of sleeping. Deliberately does not touch `revision`: the runner
     /// writes pins to disk when that moves, and a glide changes no board data.
     pub fn tick(&mut self, dt: Duration) {
+        if let Some((flash, elapsed)) = self.flash.as_mut() {
+            *elapsed += dt;
+            if *elapsed >= flash.lasts() {
+                self.flash = None;
+            }
+        }
         let Some(glide) = self.glide.as_mut() else {
             return;
         };
@@ -486,6 +536,44 @@ impl App {
     /// puts back anything an undo has since brought back.
     pub fn take_pending_deletes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_deletes)
+    }
+
+    /// Take a queued sync request. The runner calls this after each event; a
+    /// request is acted on exactly once.
+    pub fn take_pending_sync(&mut self) -> bool {
+        std::mem::take(&mut self.pending_sync)
+    }
+
+    /// Swap in the boards as they are on disk after a sync pulled commits in.
+    ///
+    /// Keeps the open world by name, the camera, and the selection while that
+    /// pin still exists. Clears undo and redo: stepping back past a pull would
+    /// put back the pins as they were before it and save over the other
+    /// machine's changes.
+    pub fn replace_boards(&mut self, boards: Vec<Board>) {
+        if boards.is_empty() {
+            return;
+        }
+        let open = self.active_board().name.clone();
+        self.boards = boards;
+        self.active = self.boards.iter().position(|b| b.name == open).unwrap_or(0);
+        if self.active_board().name != open {
+            self.centered = false;
+        }
+        let board = &self.boards[self.active];
+        self.selected = self.selected.filter(|id| board.notes.iter().any(|n| n.id == *id));
+        let highest = self.boards.iter().flat_map(|b| &b.notes).map(|n| n.id).max();
+        self.next_id = self.next_id.max(highest.unwrap_or(0) + 1);
+        self.undo.clear();
+        self.redo.clear();
+        self.pending = None;
+        self.clamp_origin();
+    }
+
+    /// Clear the sticky warning. For the runner, once a sync gets through
+    /// after one that stopped.
+    pub fn clear_warning(&mut self) {
+        self.warning = None;
     }
 
     /// Say something in the footer. For the runner, which finds out whether a
@@ -629,6 +717,12 @@ impl App {
         }
     }
 
+    fn request_sync(&mut self) {
+        if !self.refuse_if_read_only() {
+            self.pending_sync = true;
+        }
+    }
+
     fn toggle_pickup(&mut self) {
         let Some(id) = self.selected else { return };
         if let Some(note) = self.note_mut(id) {
@@ -719,6 +813,7 @@ impl App {
             KeyCode::Char('c') => self.cycle_note_color(true),
             KeyCode::Char('C') => self.cycle_note_color(false),
             KeyCode::Char('P') => self.toggle_pickup(),
+            KeyCode::Char('S') => self.request_sync(),
             KeyCode::Char('w') => self.begin_new_world(),
             KeyCode::Char('W') => self.begin_delete_world(),
             KeyCode::Char('y') => self.yank_note(),
@@ -907,6 +1002,7 @@ impl App {
             format!("{}\n{}", note.title, note.body)
         };
         self.set_copied(text);
+        self.flash = Some((Flash::Yanked(id), Duration::ZERO));
     }
 
     /// Queue text for the clipboard and say so in the footer.
@@ -3507,6 +3603,143 @@ mod tests {
         a.on_key(chord(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(a.take_pending_copy().is_some());
         assert_eq!(a.take_pending_copy(), None, "a copy is delivered once");
+    }
+
+    // ---- sync key ----
+
+    #[test]
+    fn shift_s_on_the_board_queues_one_sync() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(key(KeyCode::Char('S')));
+        assert!(a.take_pending_sync());
+        assert!(!a.take_pending_sync(), "a sync request is taken once");
+    }
+
+    #[test]
+    fn shift_s_in_a_note_is_a_letter_not_a_sync() {
+        let mut a = editing("hello");
+        a.on_key(key(KeyCode::Char('S')));
+        assert!(!a.take_pending_sync());
+    }
+
+    #[test]
+    fn a_read_only_board_refuses_to_sync_and_says_why() {
+        let mut a = app_with_pins(PINS);
+        a.set_read_only(true);
+        a.on_key(key(KeyCode::Char('S')));
+        assert!(!a.take_pending_sync());
+        assert!(a.status().is_some_and(|s| s.contains("read-only")));
+    }
+
+    /// Two worlds, `a` and `b`, with pins 1 and 2 on `b`.
+    fn two_worlds() -> Vec<Board> {
+        let mut b = app_with_pins(&[(0.0, 0.0), (1200.0, 0.0)]).boards[0].clone();
+        b.name = "b".into();
+        vec![Board::new("a"), b]
+    }
+
+    #[test]
+    fn a_reloaded_board_keeps_the_open_world_by_name() {
+        let mut a = App::new(two_worlds());
+        a.open_world("b");
+        // The other machine added a world that sorts first.
+        let mut reloaded = two_worlds();
+        reloaded.insert(0, Board::new("0-new"));
+        a.replace_boards(reloaded);
+        assert_eq!(a.active_board().name, "b");
+    }
+
+    #[test]
+    fn a_reloaded_board_opens_the_first_world_when_the_open_one_is_gone() {
+        let mut a = App::new(two_worlds());
+        a.open_world("b");
+        a.replace_boards(vec![Board::new("a")]);
+        assert_eq!(a.active_board().name, "a");
+        assert_eq!(a.selected(), None);
+    }
+
+    #[test]
+    fn a_reloaded_board_keeps_the_selection_only_while_the_pin_exists() {
+        let mut a = App::new(two_worlds());
+        a.open_world("b");
+        a.selected = Some(2);
+        a.replace_boards(two_worlds());
+        assert_eq!(a.selected(), Some(2));
+
+        let mut without = two_worlds();
+        without[1].notes.retain(|n| n.id != 2);
+        a.replace_boards(without);
+        assert_eq!(a.selected(), None);
+    }
+
+    #[test]
+    fn a_reloaded_board_cannot_be_undone_past() {
+        let mut a = App::new(two_worlds());
+        a.open_world("b");
+        a.selected = Some(1);
+        a.on_key(key(KeyCode::Char('c'))); // a local change, undoable
+        let mut pulled = two_worlds();
+        pulled[1].notes[0].title = "from the other machine".into();
+        a.replace_boards(pulled);
+        a.on_key(key(KeyCode::Char('u')));
+        assert_eq!(a.active_board().notes[0].title, "from the other machine");
+    }
+
+    // ---- flashes ----
+
+    #[test]
+    fn a_sync_flash_runs_for_the_wave_and_then_ends() {
+        let mut a = app_with_pins(PINS);
+        a.flash_synced();
+        assert!(a.animating());
+        assert_eq!(a.flash(), Some((Flash::Synced, Duration::ZERO)));
+        a.tick(SYNC_WAVE / 2);
+        assert_eq!(a.flash(), Some((Flash::Synced, SYNC_WAVE / 2)));
+        a.tick(SYNC_WAVE / 2);
+        assert_eq!(a.flash(), None);
+        assert!(!a.animating());
+    }
+
+    #[test]
+    fn yanking_a_pin_flashes_that_pin_for_the_sweep_and_fade() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(3);
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.flash(), Some((Flash::Yanked(3), Duration::ZERO)));
+        assert!(a.status().is_some_and(|s| s.starts_with("copied")));
+        a.tick(YANK_SWEEP + YANK_FADE);
+        assert_eq!(a.flash(), None);
+    }
+
+    #[test]
+    fn yanking_with_nothing_selected_flashes_nothing() {
+        let mut a = app_with_pins(PINS);
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.flash(), None);
+    }
+
+    #[test]
+    fn a_flash_does_not_count_as_a_board_change() {
+        let mut a = app_with_pins(PINS);
+        let before = a.revision();
+        a.flash_synced();
+        a.tick(SYNC_WAVE);
+        assert_eq!(a.revision(), before);
+    }
+
+    #[test]
+    fn a_new_pin_after_a_reload_takes_a_fresh_id() {
+        let mut a = App::new(two_worlds());
+        a.open_world("b");
+        let mut pulled = two_worlds();
+        pulled[1].notes[1].id = 40;
+        a.replace_boards(pulled);
+        a.set_viewport(VIEWPORT);
+        a.on_key(key(KeyCode::Char('n')));
+        a.on_key(key(KeyCode::Char('x')));
+        a.on_key(key(KeyCode::Esc));
+        let max = a.active_board().notes.iter().map(|n| n.id).max();
+        assert_eq!(max, Some(41));
     }
 
     // ---- paste ----
