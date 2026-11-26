@@ -219,9 +219,11 @@ and centers it; first line is the title, the rest the body; `enter` adds a line,
 `alt`/`ctrl`+`←`/`→` jumps by word, `ctrl`/`alt`+`backspace` deletes a word,
 `ctrl`+`u` clears the line, `esc` saves; the note scrolls with the wheel or by
 moving the caret past an edge),
-`y` to copy the whole note, `c` cycles its color (`C` backwards), `P` marks it to pick up (see
+`yy` to copy the whole note (the pin flashes, and the footer says how much;
+`yp` is kept for copying its path), `c` cycles its color (`C` backwards), `P` marks it to pick up (see
 [Pickup](#pickup)), `d` to delete,
-`u` to undo and `ctrl`+`r` to redo, `t` to cycle the theme (`T` backwards, and
+`u` to undo and `ctrl`+`r` to redo, `S` to sync now (see
+[Syncing your machines](#syncing-your-machines)), `t` to cycle the theme (`T` backwards, and
 the active one is named in the header), `q` to quit.
 
 A pin holding more text than it can show scrolls where it lies, open or not:
@@ -310,7 +312,7 @@ any movement key:
 | `ctrl`+`c` | copy the selection |
 | `ctrl`+`x` | cut it |
 | `cmd`+`←`/`→` | jump to the start or end of the line |
-| `y` (in nav) | copy the selected note whole, title and body |
+| `yy` (in nav) | copy the selected note whole, title and body |
 
 `ctrl`+`c` still quits when nothing is selected, so the escape hatch survives, and it
 saves the note you were typing on the way out, exactly as `esc` would.
@@ -376,7 +378,10 @@ the pull keeps whichever switch was more recent rather than stopping.
 Setup lives under [Install](#install); this is what sync does once it is running.
 
 `~/pinz-board` is an ordinary git repo. pinz pulls when it opens, and commits
-and pushes when you quit; `pinz sync` does both on demand. It only ever touches
+and pushes when you quit; `pinz sync` does both on demand, and so does `S` on
+the board without quitting: it saves, commits, pulls and pushes, re-reads the
+board if the pull brought anything in, and says what happened in the footer.
+A wave across the board means it got through. It only ever touches
 its own repo, so it can never sweep up or be blocked by work in progress
 anywhere else.
 

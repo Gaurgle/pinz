@@ -19,9 +19,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{note_lines, App, Mode, Prompt, TabKind};
+use crate::app::{note_lines, App, Flash, Mode, Prompt, TabKind, YANK_FADE, YANK_SWEEP};
 use crate::editor::TextEditor;
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 use crate::view::{CellRect, View};
 use crate::wrap;
 
@@ -45,6 +45,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, rows[0], app, &theme);
     draw_tabs(frame, rows[1], app, &theme);
     draw_board(frame, rows[2], app, &theme);
+    if let Some((flash, elapsed)) = app.flash() {
+        draw_flash(frame.buffer_mut(), rows[2], app, flash, elapsed, &theme);
+    }
     draw_footer(frame, rows[3], app, &theme);
     if let Some(prompt) = app.prompt() {
         draw_prompt(frame, rows[2], prompt, &theme);
@@ -54,6 +57,95 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // covering the footer costs nothing.
     if app.help() {
         draw_help(frame, area, &theme);
+    }
+}
+
+/// Paint the running flash over the board just drawn into `area`.
+fn draw_flash(
+    buf: &mut Buffer,
+    area: Rect,
+    app: &App,
+    flash: Flash,
+    elapsed: std::time::Duration,
+    theme: &Theme,
+) {
+    match flash {
+        Flash::Synced => {
+            let progress = elapsed.as_secs_f64() / crate::app::SYNC_WAVE.as_secs_f64();
+            paint_wave(buf, area, progress, theme.accent);
+        }
+        Flash::Yanked { id, from_right } => {
+            let Some(note) = app.active_board().notes.iter().find(|n| n.id == id) else {
+                return;
+            };
+            let view = View::new(app.camera(), area);
+            if let Some(rect) = view.note_rect(note.position()) {
+                paint_yank(buf, rect, elapsed, from_right, theme.text);
+            }
+        }
+    }
+}
+
+/// How many columns the sync wave's crest spans.
+const WAVE_WIDTH: f64 = 10.0;
+
+/// Light the text under the sync wave: a crest [`WAVE_WIDTH`] columns wide
+/// crossing `area` left to right as `progress` runs 0..1, entering and leaving
+/// fully off the board. Only cells holding a glyph change, their colour mixed
+/// toward `accent` by how near the crest's middle they sit, so the text
+/// ripples and blank space stays still.
+fn paint_wave(buf: &mut Buffer, area: Rect, progress: f64, accent: ratatui::style::Color) {
+    let half = WAVE_WIDTH / 2.0;
+    let centre = f64::from(area.x) - half + progress * (f64::from(area.width) + WAVE_WIDTH);
+    for x in area.left()..area.right() {
+        let strength = 1.0 - (f64::from(x) + 0.5 - centre).abs() / half;
+        if strength <= 0.0 {
+            continue;
+        }
+        for y in area.top()..area.bottom() {
+            let cell = &mut buf[(x, y)];
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            cell.fg = theme::mix(cell.fg, accent, strength);
+            if strength > 0.5 {
+                cell.modifier.insert(Modifier::BOLD);
+            }
+        }
+    }
+}
+
+/// How far a yanked pin's background moves toward the light at its brightest.
+const YANK_LIGHT: f64 = 0.45;
+
+/// Light a yanked pin in `rect`: its background brightens behind a front
+/// sweeping over [`YANK_SWEEP`], from the left edge or from the right when
+/// `from_right`, then fades back over [`YANK_FADE`], like a yanked row in
+/// notez and fleetz.
+fn paint_yank(
+    buf: &mut Buffer,
+    rect: Rect,
+    elapsed: std::time::Duration,
+    from_right: bool,
+    light: ratatui::style::Color,
+) {
+    let (width, amount) = if elapsed < YANK_SWEEP {
+        let reached = elapsed.as_secs_f64() / YANK_SWEEP.as_secs_f64();
+        ((reached * f64::from(rect.width)).ceil() as u16, YANK_LIGHT)
+    } else {
+        let faded = (elapsed - YANK_SWEEP).as_secs_f64() / YANK_FADE.as_secs_f64();
+        (rect.width, YANK_LIGHT * (1.0 - faded))
+    };
+    if amount <= 0.0 {
+        return;
+    }
+    let width = width.min(rect.width);
+    let start = if from_right { rect.right() - width } else { rect.left() };
+    for x in start..start + width {
+        for y in rect.top()..rect.bottom() {
+            let cell = &mut buf[(x, y)];
+            cell.bg = theme::mix(cell.bg, light, amount);
+        }
     }
 }
 
@@ -87,7 +179,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("n", "new pin"),
             ("e / enter", "edit it"),
-            ("y", "copy it whole"),
+            ("yy", "copy it whole"),
             ("c / C", "color, backwards"),
             ("P", "mark to pick up"),
             ("d / x / del", "delete it"),
@@ -95,6 +187,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("shift + ← ↑ → ↓", "step between pins"),
             ("shift + h j k l", "the same"),
             ("u / ctrl+r", "undo, redo"),
+            ("S", "sync: pull and push now"),
             ("scroll a pin", "read down it"),
             ("page up / down", "the same, selected"),
         ],
@@ -914,6 +1007,74 @@ mod tests {
     use ratatui::crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::Terminal;
 
+    // ---- flashes ----
+
+    const DARK: ratatui::style::Color = ratatui::style::Color::Rgb(0, 0, 0);
+    const LIGHT: ratatui::style::Color = ratatui::style::Color::Rgb(200, 200, 200);
+
+    /// A 20x1 row reading `ab` at columns 0-1 and 18-19, blank between, all
+    /// drawn in `DARK` on `DARK`.
+    const ROW: Rect = Rect { x: 0, y: 0, width: 20, height: 1 };
+
+    fn row() -> Buffer {
+        let mut buf = Buffer::empty(ROW);
+        buf.set_style(buf.area, Style::new().fg(DARK).bg(DARK));
+        buf.set_string(0, 0, "ab", Style::new());
+        buf.set_string(18, 0, "ab", Style::new());
+        buf
+    }
+
+    #[test]
+    fn the_wave_lights_text_under_its_crest_and_leaves_the_rest() {
+        let mut buf = row();
+        paint_wave(&mut buf, ROW, 0.1, LIGHT);
+        assert_ne!(buf[(0, 0)].fg, DARK, "the crest starts at the left edge");
+        assert_eq!(buf[(18, 0)].fg, DARK, "the crest has not reached the right");
+        assert_eq!(buf[(5, 0)].fg, DARK, "blank cells never light");
+
+        let mut buf = row();
+        paint_wave(&mut buf, ROW, 0.9, LIGHT);
+        assert_eq!(buf[(0, 0)].fg, DARK, "the crest has passed the left");
+        assert_ne!(buf[(18, 0)].fg, DARK, "and reached the right");
+    }
+
+    #[test]
+    fn the_wave_has_left_the_board_at_either_end() {
+        for progress in [0.0, 1.0] {
+            let mut buf = row();
+            paint_wave(&mut buf, ROW, progress, LIGHT);
+            assert_eq!(buf, row(), "progress {progress}");
+        }
+    }
+
+    #[test]
+    fn a_yank_sweeps_left_to_right_then_fades_back() {
+        let mut buf = row();
+        paint_yank(&mut buf, ROW, YANK_SWEEP / 2, false, LIGHT);
+        assert_ne!(buf[(2, 0)].bg, DARK, "swept half");
+        assert_eq!(buf[(15, 0)].bg, DARK, "not yet swept");
+
+        let mut buf = row();
+        paint_yank(&mut buf, ROW, YANK_SWEEP / 2, true, LIGHT);
+        assert_eq!(buf[(2, 0)].bg, DARK, "from the right, the left is last");
+        assert_ne!(buf[(15, 0)].bg, DARK, "and the right is first");
+
+        let mut swept = row();
+        paint_yank(&mut swept, ROW, YANK_SWEEP, false, LIGHT);
+        let mut fading = row();
+        paint_yank(&mut fading, ROW, YANK_SWEEP + YANK_FADE / 2, false, LIGHT);
+        let lit = |b: &Buffer| match b[(15, 0)].bg {
+            ratatui::style::Color::Rgb(r, _, _) => r,
+            _ => 0,
+        };
+        assert!(lit(&swept) > lit(&fading), "the light fades after the sweep");
+        assert!(lit(&fading) > 0);
+
+        let mut done = row();
+        paint_yank(&mut done, ROW, YANK_SWEEP + YANK_FADE, false, LIGHT);
+        assert_eq!(done, row(), "nothing is left once it is over");
+    }
+
     fn render_with(theme_name: Option<&str>) -> ratatui::buffer::Buffer {
         let mut store = MemoryStore::seeded();
         let mut app = App::new(store.load().unwrap());
@@ -1585,6 +1746,7 @@ mod tests {
 
         app.on_key(press(KeyCode::Char('n')));
         app.on_key(press(KeyCode::Esc)); // save, still selected in nav
+        app.on_key(press(KeyCode::Char('y')));
         app.on_key(press(KeyCode::Char('y')));
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
