@@ -202,9 +202,9 @@ enum Drag {
 const GLIDE: Duration = Duration::from_millis(140);
 
 /// How long the wave after a finished sync takes to cross the board.
-pub const SYNC_WAVE: Duration = Duration::from_millis(250);
-/// How long a yanked pin's highlight takes to sweep over it, left to right,
-/// as notez and fleetz flash a yanked row.
+pub const SYNC_WAVE: Duration = Duration::from_millis(500);
+/// How long a yanked pin's highlight takes to sweep over it, as notez and
+/// fleetz flash a yanked row: `yy` from the left, `yp` from the right.
 pub const YANK_SWEEP: Duration = Duration::from_millis(100);
 /// How long the swept pin then takes to fade back.
 pub const YANK_FADE: Duration = Duration::from_millis(200);
@@ -215,15 +215,16 @@ pub const YANK_FADE: Duration = Duration::from_millis(200);
 pub enum Flash {
     /// A sync got through: a wave sweeps the board.
     Synced,
-    /// This pin was just copied.
-    Yanked(u64),
+    /// This pin was just copied; the sweep starts at its right edge when
+    /// `from_right`.
+    Yanked { id: u64, from_right: bool },
 }
 
 impl Flash {
     fn lasts(self) -> Duration {
         match self {
             Flash::Synced => SYNC_WAVE,
-            Flash::Yanked(_) => YANK_SWEEP + YANK_FADE,
+            Flash::Yanked { .. } => YANK_SWEEP + YANK_FADE,
         }
     }
 }
@@ -308,6 +309,9 @@ pub struct App {
     /// `S` was pressed: the runner saves, commits, pulls and pushes, then
     /// hands the board back through [`Self::replace_boards`].
     pending_sync: bool,
+    /// `y` was pressed and the next key finishes the chord: `y` copies the
+    /// pin, `p` is kept for its path. Any other key drops it.
+    yank_chord: bool,
     /// The flash being drawn and how far into it we are.
     flash: Option<(Flash, Duration)>,
     /// A one-off message for the footer, cleared by the next event. A copy is
@@ -371,6 +375,7 @@ impl App {
             pending_copy: None,
             pending_deletes: Vec::new(),
             pending_sync: false,
+            yank_chord: false,
             flash: None,
             status: None,
             warning: None,
@@ -770,6 +775,8 @@ impl App {
     fn key(&mut self, key: KeyEvent) {
         // Whatever the last event had to say, this one supersedes it.
         self.status = None;
+        // Taken whatever this key turns out to be: a chord lasts one key.
+        let yank_chord = std::mem::take(&mut self.yank_chord);
         // The key that dismisses the list is spent doing so: pressing ? and
         // then n should not leave you holding a note you never asked for.
         // Checked before everything else, ctrl-c included, so there is exactly
@@ -792,6 +799,16 @@ impl App {
             Mode::Edit => return self.edit_key(key),
             Mode::Prompt => return self.prompt_key(key),
             Mode::Nav => {}
+        }
+        if yank_chord {
+            match key.code {
+                KeyCode::Char('y') => return self.yank_note(),
+                KeyCode::Char('p') => {
+                    self.status = Some("yp: copying a pin's path is not built yet".into());
+                    return;
+                }
+                _ => {}
+            }
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -816,7 +833,7 @@ impl App {
             KeyCode::Char('S') => self.request_sync(),
             KeyCode::Char('w') => self.begin_new_world(),
             KeyCode::Char('W') => self.begin_delete_world(),
-            KeyCode::Char('y') => self.yank_note(),
+            KeyCode::Char('y') => self.begin_yank(),
             KeyCode::Tab => self.switch_world(self.active + 1),
             KeyCode::BackTab => self.switch_world(self.active + self.boards.len() - 1),
             KeyCode::Char(c @ '1'..='9') => self.switch_world((c as usize) - ('1' as usize)),
@@ -991,6 +1008,11 @@ impl App {
     }
 
     /// Copy the selected note whole: the title, then the body under it.
+    fn begin_yank(&mut self) {
+        self.yank_chord = true;
+        self.status = Some("y: yy copies the pin, yp its path".into());
+    }
+
     fn yank_note(&mut self) {
         let Some(id) = self.selected else { return };
         let Some(note) = self.active_board().notes.iter().find(|n| n.id == id) else {
@@ -1002,7 +1024,7 @@ impl App {
             format!("{}\n{}", note.title, note.body)
         };
         self.set_copied(text);
-        self.flash = Some((Flash::Yanked(id), Duration::ZERO));
+        self.flash = Some((Flash::Yanked { id, from_right: false }, Duration::ZERO));
     }
 
     /// Queue text for the clipboard and say so in the footer.
@@ -1472,6 +1494,11 @@ impl App {
     // ---- mouse ----
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        // A click or scroll drops a half-typed chord; the pointer drifting
+        // between the two keys does not.
+        if m.kind != MouseEventKind::Moved {
+            self.yank_chord = false;
+        }
         self.begin_step();
         self.mouse(m);
         self.end_step();
@@ -3545,22 +3572,25 @@ mod tests {
         }
         a.on_key(key(KeyCode::Esc)); // save, still selected in Nav
         a.on_key(key(KeyCode::Char('y')));
+        a.on_key(key(KeyCode::Char('y')));
         assert_eq!(a.take_pending_copy().as_deref(), Some("new note\nbody"));
     }
 
     #[test]
-    fn y_in_nav_copies_the_title_alone_when_there_is_no_body() {
+    fn yy_in_nav_copies_the_title_alone_when_there_is_no_body() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('n')));
         a.on_key(key(KeyCode::Esc));
+        a.on_key(key(KeyCode::Char('y')));
         a.on_key(key(KeyCode::Char('y')));
         assert_eq!(a.take_pending_copy().as_deref(), Some("new note"));
     }
 
     #[test]
-    fn y_in_nav_does_nothing_with_no_note_selected() {
+    fn yy_in_nav_does_nothing_with_no_note_selected() {
         let mut a = app();
         a.selected = None;
+        a.on_key(key(KeyCode::Char('y')));
         a.on_key(key(KeyCode::Char('y')));
         assert_eq!(a.take_pending_copy(), None);
     }
@@ -3701,11 +3731,13 @@ mod tests {
     }
 
     #[test]
-    fn yanking_a_pin_flashes_that_pin_for_the_sweep_and_fade() {
+    fn yy_flashes_the_pin_from_the_left_for_the_sweep_and_fade() {
         let mut a = app_with_pins(PINS);
         a.selected = Some(3);
         a.on_key(key(KeyCode::Char('y')));
-        assert_eq!(a.flash(), Some((Flash::Yanked(3), Duration::ZERO)));
+        a.on_key(key(KeyCode::Char('y')));
+        let yanked = Flash::Yanked { id: 3, from_right: false };
+        assert_eq!(a.flash(), Some((yanked, Duration::ZERO)));
         assert!(a.status().is_some_and(|s| s.starts_with("copied")));
         a.tick(YANK_SWEEP + YANK_FADE);
         assert_eq!(a.flash(), None);
@@ -3715,7 +3747,64 @@ mod tests {
     fn yanking_with_nothing_selected_flashes_nothing() {
         let mut a = app_with_pins(PINS);
         a.on_key(key(KeyCode::Char('y')));
+        a.on_key(key(KeyCode::Char('y')));
         assert_eq!(a.flash(), None);
+    }
+
+    #[test]
+    fn a_lone_y_copies_nothing_and_waits_for_the_second_key() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(1);
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy(), None);
+        assert_eq!(a.flash(), None);
+        assert!(a.status().is_some_and(|s| s.contains("yy") && s.contains("yp")));
+    }
+
+    #[test]
+    fn yp_is_reserved_and_copies_nothing_yet() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(1);
+        a.on_key(key(KeyCode::Char('y')));
+        a.on_key(key(KeyCode::Char('p')));
+        assert_eq!(a.take_pending_copy(), None);
+        assert_eq!(a.flash(), None);
+        assert!(a.status().is_some_and(|s| s.contains("not built yet")));
+    }
+
+    #[test]
+    fn a_click_after_y_drops_the_chord() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(1);
+        let (col, row) = cell_of_note(&a, 1);
+        a.on_key(key(KeyCode::Char('y')));
+        a.on_mouse(mouse_down(col, row));
+        a.on_mouse(mouse_up(col, row));
+        assert_eq!(a.selected(), Some(1), "the click kept the pin selected");
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy(), None);
+    }
+
+    #[test]
+    fn the_pointer_drifting_between_the_keys_keeps_the_chord() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(1);
+        a.on_key(key(KeyCode::Char('y')));
+        a.on_mouse(mouse_at(MouseEventKind::Moved, 0, 0));
+        a.on_key(key(KeyCode::Char('y')));
+        assert!(a.take_pending_copy().is_some());
+    }
+
+    #[test]
+    fn another_key_after_y_drops_the_chord_and_does_its_own_job() {
+        let mut a = app_with_pins(PINS);
+        a.selected = Some(1);
+        let before = a.active_board().notes[0].color;
+        a.on_key(key(KeyCode::Char('y')));
+        a.on_key(key(KeyCode::Char('c')));
+        assert_ne!(a.active_board().notes[0].color, before, "c still cycles the color");
+        a.on_key(key(KeyCode::Char('y')));
+        assert_eq!(a.take_pending_copy(), None, "the chord started over");
     }
 
     #[test]

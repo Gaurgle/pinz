@@ -74,13 +74,13 @@ fn draw_flash(
             let progress = elapsed.as_secs_f64() / crate::app::SYNC_WAVE.as_secs_f64();
             paint_wave(buf, area, progress, theme.accent);
         }
-        Flash::Yanked(id) => {
+        Flash::Yanked { id, from_right } => {
             let Some(note) = app.active_board().notes.iter().find(|n| n.id == id) else {
                 return;
             };
             let view = View::new(app.camera(), area);
             if let Some(rect) = view.note_rect(note.position()) {
-                paint_yank(buf, rect, elapsed, theme.text);
+                paint_yank(buf, rect, elapsed, from_right, theme.text);
             }
         }
     }
@@ -119,12 +119,14 @@ fn paint_wave(buf: &mut Buffer, area: Rect, progress: f64, accent: ratatui::styl
 const YANK_LIGHT: f64 = 0.45;
 
 /// Light a yanked pin in `rect`: its background brightens behind a front
-/// sweeping left to right over [`YANK_SWEEP`], then fades back over
-/// [`YANK_FADE`], like a yanked row in notez and fleetz.
+/// sweeping over [`YANK_SWEEP`], from the left edge or from the right when
+/// `from_right`, then fades back over [`YANK_FADE`], like a yanked row in
+/// notez and fleetz.
 fn paint_yank(
     buf: &mut Buffer,
     rect: Rect,
     elapsed: std::time::Duration,
+    from_right: bool,
     light: ratatui::style::Color,
 ) {
     let (width, amount) = if elapsed < YANK_SWEEP {
@@ -137,7 +139,9 @@ fn paint_yank(
     if amount <= 0.0 {
         return;
     }
-    for x in rect.left()..rect.left() + width.min(rect.width) {
+    let width = width.min(rect.width);
+    let start = if from_right { rect.right() - width } else { rect.left() };
+    for x in start..start + width {
         for y in rect.top()..rect.bottom() {
             let cell = &mut buf[(x, y)];
             cell.bg = theme::mix(cell.bg, light, amount);
@@ -175,7 +179,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("n", "new pin"),
             ("e / enter", "edit it"),
-            ("y", "copy it whole"),
+            ("yy", "copy it whole"),
             ("c / C", "color, backwards"),
             ("P", "mark to pick up"),
             ("d / x / del", "delete it"),
@@ -1046,14 +1050,19 @@ mod tests {
     #[test]
     fn a_yank_sweeps_left_to_right_then_fades_back() {
         let mut buf = row();
-        paint_yank(&mut buf, ROW, YANK_SWEEP / 2, LIGHT);
+        paint_yank(&mut buf, ROW, YANK_SWEEP / 2, false, LIGHT);
         assert_ne!(buf[(2, 0)].bg, DARK, "swept half");
         assert_eq!(buf[(15, 0)].bg, DARK, "not yet swept");
 
+        let mut buf = row();
+        paint_yank(&mut buf, ROW, YANK_SWEEP / 2, true, LIGHT);
+        assert_eq!(buf[(2, 0)].bg, DARK, "from the right, the left is last");
+        assert_ne!(buf[(15, 0)].bg, DARK, "and the right is first");
+
         let mut swept = row();
-        paint_yank(&mut swept, ROW, YANK_SWEEP, LIGHT);
+        paint_yank(&mut swept, ROW, YANK_SWEEP, false, LIGHT);
         let mut fading = row();
-        paint_yank(&mut fading, ROW, YANK_SWEEP + YANK_FADE / 2, LIGHT);
+        paint_yank(&mut fading, ROW, YANK_SWEEP + YANK_FADE / 2, false, LIGHT);
         let lit = |b: &Buffer| match b[(15, 0)].bg {
             ratatui::style::Color::Rgb(r, _, _) => r,
             _ => 0,
@@ -1062,7 +1071,7 @@ mod tests {
         assert!(lit(&fading) > 0);
 
         let mut done = row();
-        paint_yank(&mut done, ROW, YANK_SWEEP + YANK_FADE, LIGHT);
+        paint_yank(&mut done, ROW, YANK_SWEEP + YANK_FADE, false, LIGHT);
         assert_eq!(done, row(), "nothing is left once it is over");
     }
 
@@ -1737,6 +1746,7 @@ mod tests {
 
         app.on_key(press(KeyCode::Char('n')));
         app.on_key(press(KeyCode::Esc)); // save, still selected in nav
+        app.on_key(press(KeyCode::Char('y')));
         app.on_key(press(KeyCode::Char('y')));
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal.backend().buffer().clone());
